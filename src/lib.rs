@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
-    body::Bytes,
-    extract::State,
-    http::{HeaderValue, Method, StatusCode, Uri, header},
+    extract::{Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use http_body_util::BodyExt;
 use serde_json::{Map, Value, json};
 
 /// Builds the application router.
@@ -81,11 +81,58 @@ fn no_content() -> ApiResult {
 
 /// Parses a POST/PATCH body as a JSON object (SPEC 3.1, 3.4).
 fn parse_object(body: &[u8]) -> Result<Map<String, Value>, ApiError> {
+    if has_lone_surrogate(body) {
+        return Err(ApiError::bad_request("invalid JSON: lone surrogate in string"));
+    }
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err(ApiError::bad_request("body must be a JSON object")),
         Err(e) => Err(ApiError::bad_request(format!("invalid JSON: {e}"))),
     }
+}
+
+/// Whether any `\uXXXX` escape in a JSON string is a surrogate that isn't
+/// part of a high-low pair (SPEC 3.1). Bytes outside strings are skipped;
+/// other syntax errors are left to the parser.
+fn has_lone_surrogate(body: &[u8]) -> bool {
+    fn hex4(b: &[u8]) -> Option<u16> {
+        let s = std::str::from_utf8(b.get(..4)?).ok()?;
+        u16::from_str_radix(s, 16).ok()
+    }
+    let mut i = 0;
+    let mut in_string = false;
+    while i < body.len() {
+        let b = body[i];
+        if !in_string {
+            in_string = b == b'"';
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = false;
+                i += 1;
+            }
+            b'\\' if body.get(i + 1) == Some(&b'u') => {
+                let Some(unit) = hex4(&body[i + 2..]) else { return false };
+                i += 6;
+                match unit {
+                    0xD800..=0xDBFF => {
+                        let low = (body.get(i..i + 2) == Some(b"\\u")).then(|| hex4(&body[i + 2..])).flatten();
+                        match low {
+                            Some(0xDC00..=0xDFFF) => i += 6,
+                            _ => return true,
+                        }
+                    }
+                    0xDC00..=0xDFFF => return true,
+                    _ => {}
+                }
+            }
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// A name per SPEC 3.9: 1..=max scalar values, not all whitespace.
@@ -153,8 +200,32 @@ impl Store {
 // ---------------------------------------------------------------------------
 // Routing
 
-async fn dispatch(State(state): State<Shared>, method: Method, uri: Uri, body: Bytes) -> Response {
-    match route(&state, &method, uri.path(), &body) {
+/// Bodies over this many bytes get 413 (SPEC 3.13).
+const MAX_BODY: usize = 1 << 20;
+/// Past this many bytes, stop reading an oversized body.
+const DRAIN_CAP: usize = 64 << 20;
+
+async fn dispatch(State(state): State<Shared>, request: Request) -> Response {
+    let (parts, mut body) = request.into_parts();
+    // Read the whole body even past the limit (up to a cap), so a client
+    // still writing it gets the 413 rather than a reset connection.
+    let mut buf = Vec::new();
+    let mut total = 0usize;
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else { break };
+        if let Ok(data) = frame.into_data() {
+            total += data.len();
+            if total <= MAX_BODY {
+                buf.extend_from_slice(&data);
+            } else if total > DRAIN_CAP {
+                break;
+            }
+        }
+    }
+    if total > MAX_BODY {
+        return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    match route(&state, &parts.method, parts.uri.path(), &buf) {
         Ok(resp) | Err(resp) => resp,
     }
 }

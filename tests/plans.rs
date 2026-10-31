@@ -63,6 +63,37 @@ fn err(r: &Resp, status: u16) {
 }
 
 #[test]
+fn body_limits() {
+    let s = start();
+    for bad in [
+        &br#"{"name": "a", "x": "\ud800\ud800"}"#[..],
+        br#"{"name": "a", "x": "\ud800\n"}"#,
+        br#"{"name": "a", "x": "\ud800"}"#,
+        br#"{"name": "a", "x": "\uDFFF\uD800"}"#,
+        br#"{"name": "a", "\ud800": 1}"#,
+        b"{\"name\": \"a\", \"x\": \"\xff\"}",
+        b"\xef\xbb\xbf{\"name\": \"a\"}",
+        br#"{"name": "a", "x": 1e400}"#,
+    ] {
+        err(&req(&s, "POST", "/plans", Some(bad)), 400);
+    }
+    let deep = format!(r#"{{"name": "a", "x": {}1{}}}"#, "[".repeat(63), "]".repeat(63));
+    assert_eq!(req(&s, "POST", "/plans", Some(deep.as_bytes())).status, 201);
+    let ok = br#"{"name": "a", "x": [1e300, -0, 100000000000000000000000, "\\ud800", {"y": null}]}"#;
+    assert_eq!(req(&s, "POST", "/plans", Some(ok)).status, 201);
+
+    let just_under = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat((1 << 20) - 22));
+    assert_eq!(just_under.len(), 1 << 20);
+    assert_eq!(req(&s, "POST", "/plans", Some(just_under.as_bytes())).status, 201);
+    let over = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat(1 << 20));
+    err(&req(&s, "POST", "/plans", Some(over.as_bytes())), 413);
+    let huge = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat(5 << 20));
+    err(&req(&s, "POST", "/plans", Some(huge.as_bytes())), 413);
+    err(&req(&s, "PATCH", "/plans/nope", Some(huge.as_bytes())), 413);
+    assert_eq!(req(&s, "GET", "/plans", None).json().as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn plans_crud_and_errors() {
     let s = start();
     let r = req(&s, "GET", "/health", None);
