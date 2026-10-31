@@ -1,66 +1,6 @@
-//! Starts the real binary and talks raw HTTP/1.1 to it.
+mod common;
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-
-struct Server {
-    child: Child,
-    addr: String,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
-}
-
-fn start() -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mybudget-server"))
-        .env("MYBUDGET_ADDR", "127.0.0.1:0")
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
-    let addr = line.trim().strip_prefix("listening on ").unwrap().to_string();
-    Server { child, addr }
-}
-
-struct Resp {
-    status: u16,
-    headers: String,
-    body: String,
-}
-
-impl Resp {
-    fn json(&self) -> serde_json::Value {
-        assert!(self.headers.to_ascii_lowercase().contains("content-type: application/json"), "{}", self.headers);
-        serde_json::from_str(&self.body).unwrap()
-    }
-}
-
-fn req(s: &Server, method: &str, path: &str, body: Option<&[u8]>) -> Resp {
-    let mut stream = TcpStream::connect(&s.addr).unwrap();
-    let body = body.unwrap_or(b"");
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).unwrap();
-    stream.write_all(body).unwrap();
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
-    let raw = String::from_utf8(raw).unwrap();
-    let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
-    let status = headers[9..12].parse().unwrap();
-    Resp { status, headers: headers.to_string(), body: body.to_string() }
-}
-
-fn err(r: &Resp, status: u16) {
-    assert_eq!(r.status, status, "{}", r.body);
-    assert!(!r.json()["error"].as_str().unwrap().is_empty());
-}
+use common::*;
 
 #[test]
 fn body_limits() {
@@ -81,6 +21,9 @@ fn body_limits() {
     assert_eq!(req(&s, "POST", "/plans", Some(deep.as_bytes())).status, 201);
     let ok = br#"{"name": "a", "x": [1e300, -0, 100000000000000000000000, "\\ud800", {"y": null}]}"#;
     assert_eq!(req(&s, "POST", "/plans", Some(ok)).status, 201);
+    // Ignored fields may hold any JSON, including keys serde_json treats specially.
+    let magic = br#"{"name": "a", "x": {"$serde_json::private::RawValue": "nope"}, "y": {"$serde_json::private::Number": 1}}"#;
+    assert_eq!(req(&s, "POST", "/plans", Some(magic)).status, 201);
 
     let just_under = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat((1 << 20) - 22));
     assert_eq!(just_under.len(), 1 << 20);
@@ -90,7 +33,7 @@ fn body_limits() {
     let huge = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat(5 << 20));
     err(&req(&s, "POST", "/plans", Some(huge.as_bytes())), 413);
     err(&req(&s, "PATCH", "/plans/nope", Some(huge.as_bytes())), 413);
-    assert_eq!(req(&s, "GET", "/plans", None).json().as_array().unwrap().len(), 3);
+    assert_eq!(req(&s, "GET", "/plans", None).json().as_array().unwrap().len(), 4);
 }
 
 #[test]
