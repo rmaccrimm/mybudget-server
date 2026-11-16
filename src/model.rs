@@ -175,9 +175,7 @@ impl Category {
     }
 }
 
-// Only starting balances create transactions until transactions get
-// endpoints (SPEC 8), so some of this isn't read yet.
-#[allow(dead_code, clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cleared {
     Uncleared,
@@ -185,8 +183,9 @@ pub enum Cleared {
     Reconciled,
 }
 
-#[allow(dead_code)]
 impl Cleared {
+    const ALL: [Cleared; 3] = [Self::Uncleared, Self::Cleared, Self::Reconciled];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Uncleared => "uncleared",
@@ -194,9 +193,35 @@ impl Cleared {
             Self::Reconciled => "reconciled",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+
+    /// A new transaction's default: money in a wallet clears at once
+    /// (SPEC 8.1).
+    pub fn default_for(kind: AccountType) -> Self {
+        if kind == AccountType::Cash { Self::Cleared } else { Self::Uncleared }
+    }
 }
 
-#[allow(dead_code)]
+/// Flag colours (SPEC 8.1).
+pub const FLAG_COLORS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+
+#[derive(Clone, Debug)]
+pub struct Subtransaction {
+    pub amount: i64,
+    pub category_id: String,
+    pub memo: Option<String>,
+}
+
+impl Subtransaction {
+    pub fn to_json(&self) -> Value {
+        json!({ "amount": self.amount, "category_id": self.category_id, "memo": self.memo })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Transaction {
     pub id: String,
     pub account_id: String,
@@ -208,6 +233,31 @@ pub struct Transaction {
     pub cleared: Cleared,
     pub approved: bool,
     pub flag_color: Option<String>,
+    /// For a transfer, the other half's account and id (SPEC 9.1).
+    pub transfer_account_id: Option<String>,
+    pub transfer_transaction_id: Option<String>,
+    /// In the order given; empty unless it's a split (SPEC 10).
+    pub subtransactions: Vec<Subtransaction>,
+}
+
+impl Transaction {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "account_id": self.account_id,
+            "date": self.date,
+            "amount": self.amount,
+            "payee_id": self.payee_id,
+            "category_id": self.category_id,
+            "memo": self.memo,
+            "cleared": self.cleared.as_str(),
+            "approved": self.approved,
+            "flag_color": self.flag_color,
+            "transfer_account_id": self.transfer_account_id,
+            "transfer_transaction_id": self.transfer_transaction_id,
+            "subtransactions": self.subtransactions.iter().map(Subtransaction::to_json).collect::<Vec<_>>(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +406,9 @@ impl Plan {
                 cleared: Cleared::Cleared,
                 approved: true,
                 flag_color: None,
+                transfer_account_id: None,
+                transfer_transaction_id: None,
+                subtransactions: Vec::new(),
             });
         }
         self.accounts.len() - 1
@@ -414,6 +467,12 @@ impl Plan {
 
     pub fn payee_in_use(&self, payee_id: &str) -> bool {
         self.transactions.iter().any(|t| t.payee_id.as_deref() == Some(payee_id))
+    }
+
+    // --- transactions -----------------------------------------------------
+
+    pub fn transaction_index(&self, id: &str) -> Result<usize, ApiError> {
+        self.transactions.iter().position(|t| t.id == id).ok_or_else(ApiError::not_found)
     }
 
     // --- categories -------------------------------------------------------

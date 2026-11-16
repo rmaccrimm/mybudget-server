@@ -55,7 +55,7 @@ async fn dispatch(State(state): State<Shared>, request: Request) -> Response {
     if total > MAX_BODY {
         return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    match route(&state, &parts.method, parts.uri.path(), &buf) {
+    match route(&state, &parts.method, parts.uri.path(), parts.uri.query(), &buf) {
         Ok(resp) => resp,
         Err(err) => err.into_response(),
     }
@@ -74,6 +74,8 @@ enum Route<'a> {
     Category(&'a str, &'a str),
     Groups(&'a str),
     Group(&'a str, &'a str),
+    Transactions(&'a str),
+    Transaction(&'a str, &'a str),
 }
 
 impl<'a> Route<'a> {
@@ -95,6 +97,8 @@ impl<'a> Route<'a> {
             ["plans", p, "categories", c] => Self::Category(p, c),
             ["plans", p, "category_groups"] => Self::Groups(p),
             ["plans", p, "category_groups", g] => Self::Group(p, g),
+            ["plans", p, "transactions"] => Self::Transactions(p),
+            ["plans", p, "transactions", t] => Self::Transaction(p, t),
             _ => return None,
         })
     }
@@ -104,15 +108,19 @@ impl<'a> Route<'a> {
     fn allow(&self) -> &'static str {
         match self {
             Self::Health => "GET, HEAD",
-            Self::Plans | Self::Accounts(_) | Self::Payees(_) | Self::Categories(_) => "GET, HEAD, POST",
-            Self::Plan(_) | Self::Account(..) | Self::Payee(..) | Self::Group(..) => "GET, HEAD, PATCH, DELETE",
+            Self::Plans | Self::Accounts(_) | Self::Payees(_) | Self::Categories(_) | Self::Transactions(_) => {
+                "GET, HEAD, POST"
+            }
+            Self::Plan(_) | Self::Account(..) | Self::Payee(..) | Self::Group(..) | Self::Transaction(..) => {
+                "GET, HEAD, PATCH, DELETE"
+            }
             Self::Category(..) => "GET, HEAD, PATCH",
             Self::Groups(_) => "POST",
         }
     }
 }
 
-fn route(state: &Shared, method: &Method, path: &str, body: &[u8]) -> ApiResult {
+fn route(state: &Shared, method: &Method, path: &str, query: Option<&str>, body: &[u8]) -> ApiResult {
     let route = Route::parse(path).ok_or_else(ApiError::not_found)?;
     let allow = route.allow();
     if !allow.split(", ").any(|m| m == method.as_str()) {
@@ -126,7 +134,7 @@ fn route(state: &Shared, method: &Method, path: &str, body: &[u8]) -> ApiResult 
 
     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     let store = &mut *guard;
-    use api::{accounts, categories, payees, plans};
+    use api::{accounts, categories, payees, plans, transactions};
     use Route as R;
     match (route, method) {
         (R::Plans, "GET") => plans::list(store),
@@ -156,6 +164,12 @@ fn route(state: &Shared, method: &Method, path: &str, body: &[u8]) -> ApiResult 
         (R::Group(p, g), "GET") => categories::get_group(store, p, g),
         (R::Group(p, g), "PATCH") => categories::update_group(store, p, g, body),
         (R::Group(p, g), "DELETE") => categories::delete_group(store, p, g),
+
+        (R::Transactions(p), "GET") => transactions::list(store, p, query),
+        (R::Transactions(p), "POST") => transactions::create(store, p, body),
+        (R::Transaction(p, t), "GET") => transactions::get(store, p, t),
+        (R::Transaction(p, t), "PATCH") => transactions::update(store, p, t, body),
+        (R::Transaction(p, t), "DELETE") => transactions::delete(store, p, t),
 
         _ => unreachable!("allow() lists exactly the methods handled here"),
     }
