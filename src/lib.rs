@@ -14,6 +14,7 @@ use axum::{
 use http_body_util::BodyExt;
 
 mod api;
+mod budget;
 mod error;
 mod fields;
 mod json;
@@ -76,6 +77,8 @@ enum Route<'a> {
     Group(&'a str, &'a str),
     Transactions(&'a str),
     Transaction(&'a str, &'a str),
+    Month(&'a str, &'a str),
+    MonthCategory(&'a str, &'a str, &'a str),
 }
 
 impl<'a> Route<'a> {
@@ -99,6 +102,8 @@ impl<'a> Route<'a> {
             ["plans", p, "category_groups", g] => Self::Group(p, g),
             ["plans", p, "transactions"] => Self::Transactions(p),
             ["plans", p, "transactions", t] => Self::Transaction(p, t),
+            ["plans", p, "months", m] => Self::Month(p, m),
+            ["plans", p, "months", m, "categories", c] => Self::MonthCategory(p, m, c),
             _ => return None,
         })
     }
@@ -107,14 +112,14 @@ impl<'a> Route<'a> {
     /// wherever `GET` does (SPEC 3.4).
     fn allow(&self) -> &'static str {
         match self {
-            Self::Health => "GET, HEAD",
+            Self::Health | Self::Month(..) => "GET, HEAD",
             Self::Plans | Self::Accounts(_) | Self::Payees(_) | Self::Categories(_) | Self::Transactions(_) => {
                 "GET, HEAD, POST"
             }
             Self::Plan(_) | Self::Account(..) | Self::Payee(..) | Self::Group(..) | Self::Transaction(..) => {
                 "GET, HEAD, PATCH, DELETE"
             }
-            Self::Category(..) => "GET, HEAD, PATCH",
+            Self::Category(..) | Self::MonthCategory(..) => "GET, HEAD, PATCH",
             Self::Groups(_) => "POST",
         }
     }
@@ -134,7 +139,7 @@ fn route(state: &Shared, method: &Method, path: &str, query: Option<&str>, body:
 
     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     let store = &mut *guard;
-    use api::{accounts, categories, payees, plans, transactions};
+    use api::{accounts, categories, months, payees, plans, transactions};
     use Route as R;
     match (route, method) {
         (R::Plans, "GET") => plans::list(store),
@@ -170,6 +175,10 @@ fn route(state: &Shared, method: &Method, path: &str, query: Option<&str>, body:
         (R::Transaction(p, t), "GET") => transactions::get(store, p, t),
         (R::Transaction(p, t), "PATCH") => transactions::update(store, p, t, body),
         (R::Transaction(p, t), "DELETE") => transactions::delete(store, p, t),
+
+        (R::Month(p, m), "GET") => months::get(store, p, m),
+        (R::MonthCategory(p, m, c), "GET") => months::get_category(store, p, m, c),
+        (R::MonthCategory(p, m, c), "PATCH") => months::update_category(store, p, m, c, body),
 
         _ => unreachable!("allow() lists exactly the methods handled here"),
     }

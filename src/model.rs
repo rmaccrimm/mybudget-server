@@ -1,5 +1,6 @@
 //! The data the server keeps, and its JSON views.
 
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -277,6 +278,9 @@ pub struct Plan {
     pub categories: Vec<Category>,
     /// Oldest first.
     pub transactions: Vec<Transaction>,
+    /// Each category's assigned amounts by month index (SPEC 11.2); a
+    /// month missing from the map has 0 assigned.
+    pub assigned: HashMap<String, BTreeMap<i32, i64>>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -305,6 +309,7 @@ impl Plan {
             groups: vec![internal],
             categories: Vec::new(),
             transactions: Vec::new(),
+            assigned: HashMap::new(),
         }
     }
 
@@ -517,7 +522,9 @@ impl Plan {
         category.group_id = to.id.clone();
     }
 
+    /// Removes a category along with its assigned amounts.
     pub fn remove_category(&mut self, id: &str) {
+        self.assigned.remove(id);
         self.categories.retain(|c| c.id != id);
         for g in &mut self.groups {
             g.category_ids.retain(|c| c != id);

@@ -278,7 +278,7 @@ fn plan_scoping_and_precedence() {
     err(&delete(&s, &format!("/plans/{b}/payees/{payee}")), 404);
     err(&req(&s, "PUT", "/plans/missing/accounts/missing", None), 405);
     err(&post(&s, "/plans/missing/accounts", "nope"), 404);
-    err(&get(&s, &format!("/plans/{a}/transactions")), 404);
+    err(&get(&s, &format!("/plans/{a}/months")), 404);
     err(&get(&s, &format!("/plans/{a}/accounts/{acc}/extra")), 404);
     err(&get(&s, &format!("/plans/{a}/accounts/")), 404);
     assert_eq!(delete(&s, &format!("/plans/{a}")).status, 204);

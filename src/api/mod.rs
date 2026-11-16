@@ -4,6 +4,7 @@
 
 pub mod accounts;
 pub mod categories;
+pub mod months;
 pub mod payees;
 pub mod plans;
 pub mod transactions;
