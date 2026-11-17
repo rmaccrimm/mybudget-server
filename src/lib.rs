@@ -56,7 +56,10 @@ pub fn app() -> Router {
         .route("/plans/{plan}/payees", get(payees::list).post(payees::create))
         .route("/plans/{plan}/payees/{payee}", get(payees::get).patch(payees::update).delete(payees::delete))
         .route("/plans/{plan}/categories", get(categories::list).post(categories::create))
-        .route("/plans/{plan}/categories/{category}", get(categories::get).patch(categories::update))
+        .route(
+            "/plans/{plan}/categories/{category}",
+            get(categories::get).patch(categories::update).delete(categories::delete),
+        )
         .route("/plans/{plan}/category_groups", post(categories::create_group))
         .route(
             "/plans/{plan}/category_groups/{group}",

@@ -309,7 +309,7 @@ fn categories_and_groups() {
 
     err(&get(&s, &format!("{categories}/ready_to_assign")), 404);
     err(&patch(&s, &format!("{categories}/ready_to_assign"), "{}"), 404);
-    err(&delete(&s, &rpath), 405);
+    err(&req(&s, "PUT", &rpath, Some(b"{}")), 405);
     err(&get(&s, &groups), 405);
     let head = req(&s, "HEAD", &groups, None);
     assert_eq!((head.status, head.body.as_str()), (405, ""));

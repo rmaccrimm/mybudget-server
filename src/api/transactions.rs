@@ -523,11 +523,7 @@ pub async fn list(
         .values()
         .filter(|t| account_id.as_ref().is_none_or(|a| &t.account_id == a))
         .filter(|t| payee_id.as_ref().is_none_or(|p| t.payee_id.as_ref() == Some(p)))
-        .filter(|t| {
-            category_id.as_ref().is_none_or(|c| {
-                t.category_id.as_ref() == Some(c) || t.subtransactions.iter().any(|s| &s.category_id == c)
-            })
-        })
+        .filter(|t| category_id.as_ref().is_none_or(|c| t.has_category(c)))
         .filter(|t| since.as_ref().is_none_or(|d| &t.date >= d))
         .filter(|t| until.as_ref().is_none_or(|d| &t.date <= d))
         .filter(|t| approved.is_none_or(|a| t.approved == a))

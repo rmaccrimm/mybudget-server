@@ -230,6 +230,26 @@ pub struct Transaction {
     pub subtransactions: Vec<Subtransaction>,
 }
 
+impl Transaction {
+    /// Whether the transaction or one of its subtransactions has the
+    /// category (SPEC 8.5, 13.2).
+    pub fn has_category(&self, category_id: &str) -> bool {
+        self.category_id.as_deref() == Some(category_id)
+            || self.subtransactions.iter().any(|s| s.category_id == category_id)
+    }
+
+    /// Moves the transaction and its subtransactions from category `from`
+    /// to `to`, changing nothing else (SPEC 13.3).
+    fn recategorize(&mut self, from: &str, to: &str) {
+        if self.category_id.as_deref() == Some(from) {
+            self.category_id = Some(to.to_owned());
+        }
+        for s in self.subtransactions.iter_mut().filter(|s| s.category_id == from) {
+            s.category_id = to.to_owned();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plans
 
@@ -413,5 +433,30 @@ impl Plan {
 
     pub fn group_view(&self, group: &Group) -> GroupView {
         GroupView { group: group.clone(), categories: self.group_categories(&group.id).cloned().collect() }
+    }
+
+    pub fn category_in_use(&self, category_id: &str) -> bool {
+        self.transactions.values().any(|t| t.has_category(category_id))
+    }
+
+    /// Deletes a user category (SPEC 13.3). With `reassign_to`, its
+    /// transactions and subtransactions move to that category, and its
+    /// assigned amounts are added to that category's, month by month.
+    /// Without it, its assigned amounts are dropped; the caller checks it
+    /// isn't in use.
+    pub fn delete_category(&mut self, category_id: &str, reassign_to: Option<&str>) {
+        self.categories.shift_remove(category_id).expect("the caller found the category");
+        let assigned = self.assigned.remove(category_id).unwrap_or_default();
+        let Some(to) = reassign_to else {
+            debug_assert!(!self.category_in_use(category_id));
+            return;
+        };
+        for t in self.transactions.values_mut() {
+            t.recategorize(category_id, to);
+        }
+        let target = self.assigned.entry(to.to_owned()).or_default();
+        for (month, amount) in assigned {
+            *target.entry(month).or_insert(0) += amount;
+        }
     }
 }

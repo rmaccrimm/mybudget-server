@@ -1,9 +1,9 @@
-//! Category groups and categories (SPEC 7).
+//! Category groups and categories (SPEC 7, 13).
 
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -161,4 +161,39 @@ pub async fn update(
     }
     plan.categories.insert(category_id, category.clone());
     Ok(Json(category))
+}
+
+/// `reassign_to` must name one of the plan's user categories other than the
+/// one being deleted (SPEC 13.2). Ready to Assign isn't in the plan's
+/// categories, so it fails the lookup.
+fn reassign_target(plan: &Plan, deleted_id: &str, id: String) -> Result<String, ApiError> {
+    match plan.categories.get(&id) {
+        Some(c) if c.payment_account_id.is_none() && c.id != deleted_id => Ok(id),
+        _ => Err(ApiError::bad_request(
+            "reassign_to must name one of the plan's user categories other than the one being deleted",
+        )),
+    }
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    Path((plan_id, category_id)): Path<(String, String)>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let plan = store.plan_mut(&plan_id)?;
+    // A payment category goes only with its account (SPEC 13.1).
+    if plan.categories.by_id(&category_id)?.payment_account_id.is_some() {
+        return Err(ApiError::bad_request("a payment category can't be deleted"));
+    }
+    // Every value is checked, and the last counts (SPEC 3.5).
+    let mut reassign_to = None;
+    for (_, id) in query.into_iter().filter(|(key, _)| key == "reassign_to") {
+        reassign_to = Some(reassign_target(plan, &category_id, id)?);
+    }
+    if reassign_to.is_none() && plan.category_in_use(&category_id) {
+        return Err(ApiError::conflict("category is in use"));
+    }
+    plan.delete_category(&category_id, reassign_to.as_deref());
+    Ok(StatusCode::NO_CONTENT)
 }
