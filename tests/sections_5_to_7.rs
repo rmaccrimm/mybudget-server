@@ -16,7 +16,11 @@ fn accounts_create_list_and_balances() {
     let accounts = format!("/plans/{p}/accounts");
 
     let checking = expect(
-        post(&s, &accounts, r#"{"name": "Checking", "type": "checking", "starting_balance": 2500000, "starting_date": "2026-10-01"}"#),
+        post(
+            &s,
+            &accounts,
+            r#"{"name": "Checking", "type": "checking", "starting_balance": 2500000, "starting_date": "2026-10-01"}"#,
+        ),
         201,
     );
     let cid = id(&checking);
@@ -39,7 +43,11 @@ fn accounts_create_list_and_balances() {
     );
 
     let visa = expect(
-        post(&s, &accounts, r#"{"name": "Visa", "type": "creditCard", "starting_balance": -350000, "starting_date": "2026-10-01", "note": "n"}"#),
+        post(
+            &s,
+            &accounts,
+            r#"{"name": "Visa", "type": "creditCard", "starting_balance": -350000, "starting_date": "2026-10-01", "note": "n"}"#,
+        ),
         201,
     );
     assert_eq!(visa["balance"], -350000);
@@ -61,13 +69,31 @@ fn accounts_create_list_and_balances() {
     let house = expect(post(&s, &accounts, r#"{"name": "House", "type": "otherAsset", "starting_balance": -0}"#), 201);
     assert_eq!((house["on_budget"].clone(), house["balance"].clone()), (json!(false), json!(0)));
     assert_eq!(delete(&s, &format!("{accounts}/{}", id(&house))).status, 204);
-    let loan = expect(post(&s, &accounts, r#"{"name": "Loan", "type": "otherLiability", "starting_balance": 0, "starting_date": "2026-01-01"}"#), 201);
+    let loan = expect(
+        post(
+            &s,
+            &accounts,
+            r#"{"name": "Loan", "type": "otherLiability", "starting_balance": 0, "starting_date": "2026-01-01"}"#,
+        ),
+        201,
+    );
     assert_eq!(loan["payment_category_id"], Value::Null);
-    let loc = expect(post(&s, &accounts, r#"{"name": "LOC", "type": "lineOfCredit", "starting_balance": 1000000000000, "starting_date": "2999-12-31"}"#), 201);
+    let loc = expect(
+        post(
+            &s,
+            &accounts,
+            r#"{"name": "LOC", "type": "lineOfCredit", "starting_balance": 1000000000000, "starting_date": "2999-12-31"}"#,
+        ),
+        201,
+    );
     assert!(loc["payment_category_id"].is_string());
     assert_eq!(loc["balance"], 1_000_000_000_000i64);
 
-    let before = (get(&s, &accounts).body, get(&s, &format!("/plans/{p}/payees")).body, get(&s, &format!("/plans/{p}/categories")).body);
+    let before = (
+        get(&s, &accounts).body,
+        get(&s, &format!("/plans/{p}/payees")).body,
+        get(&s, &format!("/plans/{p}/categories")).body,
+    );
     for bad in [
         r#"{"type": "checking"}"#,
         r#"{"name": "A"}"#,
@@ -91,7 +117,11 @@ fn accounts_create_list_and_balances() {
     }
     let long_note = "x".repeat(501);
     err(&post(&s, &accounts, &format!(r#"{{"name": "A", "type": "cash", "note": "{long_note}"}}"#)), 400);
-    let after = (get(&s, &accounts).body, get(&s, &format!("/plans/{p}/payees")).body, get(&s, &format!("/plans/{p}/categories")).body);
+    let after = (
+        get(&s, &accounts).body,
+        get(&s, &format!("/plans/{p}/payees")).body,
+        get(&s, &format!("/plans/{p}/categories")).body,
+    );
     assert_eq!(before, after);
 }
 
@@ -101,7 +131,11 @@ fn accounts_patch_close_and_delete() {
     let p = new_plan(&s);
     let accounts = format!("/plans/{p}/accounts");
     let visa = expect(
-        post(&s, &accounts, r#"{"name": "Visa", "type": "creditCard", "starting_balance": -350000, "starting_date": "2026-10-01"}"#),
+        post(
+            &s,
+            &accounts,
+            r#"{"name": "Visa", "type": "creditCard", "starting_balance": -350000, "starting_date": "2026-10-01"}"#,
+        ),
         201,
     );
     let vid = id(&visa);
@@ -145,7 +179,10 @@ fn accounts_patch_close_and_delete() {
     assert_eq!(delete(&s, &format!("{accounts}/{}", id(&mc))).status, 204);
     err(&get(&s, &format!("/plans/{p}/categories/{mcpay}")), 404);
     err(&get(&s, &format!("/plans/{p}/payees/{}", mc["transfer_payee_id"].as_str().unwrap())), 404);
-    assert_eq!(names(&expect(get(&s, &format!("/plans/{p}/payees")), 200)), ["Transfer : Visa Gold", "Starting Balance"]);
+    assert_eq!(
+        names(&expect(get(&s, &format!("/plans/{p}/payees")), 200)),
+        ["Transfer : Visa Gold", "Starting Balance"]
+    );
 }
 
 #[test]
@@ -154,7 +191,11 @@ fn payees() {
     let p = new_plan(&s);
     let payees = format!("/plans/{p}/payees");
     let checking = expect(
-        post(&s, &format!("/plans/{p}/accounts"), r#"{"name": "Checking", "type": "checking", "starting_balance": 1, "starting_date": "2026-10-01"}"#),
+        post(
+            &s,
+            &format!("/plans/{p}/accounts"),
+            r#"{"name": "Checking", "type": "checking", "starting_balance": 1, "starting_date": "2026-10-01"}"#,
+        ),
         201,
     );
     let tp = checking["transfer_payee_id"].as_str().unwrap().to_string();
@@ -193,7 +234,10 @@ fn categories_and_groups() {
     let other = new_plan(&s);
     let cats = expect(get(&s, &format!("/plans/{p}/categories")), 200);
     let ccp = cats[0]["id"].as_str().unwrap().to_string();
-    assert_eq!(cats, json!([{"id": ccp, "name": "Credit Card Payments", "hidden": false, "internal": true, "categories": []}]));
+    assert_eq!(
+        cats,
+        json!([{"id": ccp, "name": "Credit Card Payments", "hidden": false, "internal": true, "categories": []}])
+    );
 
     let groups = format!("/plans/{p}/category_groups");
     let bills = expect(post(&s, &groups, r#"{"name": "Bills", "hidden": true}"#), 201);
@@ -205,8 +249,12 @@ fn categories_and_groups() {
     let categories = format!("/plans/{p}/categories");
     let rent = expect(post(&s, &categories, &format!(r#"{{"group_id": "{bid}", "name": "Rent"}}"#)), 201);
     let rid = id(&rent);
-    assert_eq!(rent, json!({"id": rid, "group_id": bid, "name": "Rent", "hidden": false, "note": null, "payment_account_id": null}));
-    let water = id(&expect(post(&s, &categories, &format!(r#"{{"group_id": "{bid}", "name": "Water", "note": "n"}}"#)), 201));
+    assert_eq!(
+        rent,
+        json!({"id": rid, "group_id": bid, "name": "Rent", "hidden": false, "note": null, "payment_account_id": null})
+    );
+    let water =
+        id(&expect(post(&s, &categories, &format!(r#"{{"group_id": "{bid}", "name": "Water", "note": "n"}}"#)), 201));
     for bad in [
         format!(r#"{{"group_id": "{ccp}", "name": "X"}}"#),
         format!(r#"{{"group_id": "{foreign}", "name": "X"}}"#),
@@ -233,7 +281,10 @@ fn categories_and_groups() {
 
     let rpath = format!("{categories}/{rid}");
     let moved = expect(patch(&s, &rpath, &format!(r#"{{"group_id": "{housing}", "note": "due on the 1st"}}"#)), 200);
-    assert_eq!(moved, json!({"id": rid, "group_id": housing, "name": "Rent", "hidden": false, "note": "due on the 1st", "payment_account_id": null}));
+    assert_eq!(
+        moved,
+        json!({"id": rid, "group_id": housing, "name": "Rent", "hidden": false, "note": "due on the 1st", "payment_account_id": null})
+    );
     err(&patch(&s, &rpath, &format!(r#"{{"group_id": "{ccp}"}}"#)), 400);
     err(&patch(&s, &rpath, &format!(r#"{{"group_id": "{foreign}"}}"#)), 400);
     err(&patch(&s, &rpath, r#"{"hidden": null}"#), 400);

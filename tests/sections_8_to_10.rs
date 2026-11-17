@@ -27,7 +27,11 @@ fn account(s: &Server, p: &str, body: &str) -> Value {
 fn setup() -> Fixture {
     let s = start();
     let p = new_plan(&s);
-    let c = account(&s, &p, r#"{"name": "Checking", "type": "checking", "starting_balance": 2500000, "starting_date": "2026-10-01"}"#);
+    let c = account(
+        &s,
+        &p,
+        r#"{"name": "Checking", "type": "checking", "starting_balance": 2500000, "starting_date": "2026-10-01"}"#,
+    );
     let sv = account(&s, &p, r#"{"name": "Savings", "type": "savings"}"#);
     let a = account(&s, &p, r#"{"name": "House", "type": "otherAsset"}"#);
     let v = account(&s, &p, r#"{"name": "Visa", "type": "creditCard"}"#);
@@ -152,10 +156,18 @@ fn validation() {
     bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1, "category_id": "{}"}}"#, f.visa_payment));
     bad(format!(r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": -1, "category_id": "{g}"}}"#));
     bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1.0, "category_id": "{g}"}}"#));
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "flag_color": "pink"}}"#));
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "cleared": null}}"#));
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "payee_id": "x", "payee_name": "ok"}}"#));
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "payee_name": "   "}}"#));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "flag_color": "pink"}}"#
+    ));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "cleared": null}}"#
+    ));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "payee_id": "x", "payee_name": "ok"}}"#
+    ));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "payee_name": "   "}}"#
+    ));
     bad(r#"{"account_id": "nope", "date": "2026-10-04", "amount": 1, "category_id": "ready_to_assign"}"#.into());
     // A failed request creates no payee (SPEC 3.11).
     bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "payee_name": "Ghost"}}"#));
@@ -166,7 +178,8 @@ fn validation() {
     let t = f.create(&format!(r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": 5}}"#));
     assert_eq!(t["category_id"], Value::Null);
     let wallet = id(&account(&f.s, &f.p, r#"{"name": "Wallet", "type": "cash"}"#));
-    let t = f.create(&format!(r#"{{"account_id": "{wallet}", "date": "2026-10-04", "amount": 5, "category_id": "{g}"}}"#));
+    let t =
+        f.create(&format!(r#"{{"account_id": "{wallet}", "date": "2026-10-04", "amount": 5, "category_id": "{g}"}}"#));
     assert_eq!(t["cleared"], "cleared");
     err(&f.patch(&id(&t), &format!(r#"{{"account_id": "{c}"}}"#)), 400);
     expect(f.patch(&id(&t), &format!(r#"{{"account_id": "{wallet}"}}"#)), 200);
@@ -202,7 +215,10 @@ fn transfers() {
     // Date and amount follow; memo doesn't.
     expect(f.patch(&in_id, r#"{"amount": 7000, "date": "2026-10-09", "memo": "m"}"#), 200);
     let o = f.get(&out_id);
-    assert_eq!((o["amount"].clone(), o["date"].clone(), o["memo"].clone()), (json!(-7000), json!("2026-10-09"), Value::Null));
+    assert_eq!(
+        (o["amount"].clone(), o["date"].clone(), o["memo"].clone()),
+        (json!(-7000), json!("2026-10-09"), Value::Null)
+    );
 
     // Changing to an ordinary payee needs a category, and deletes the other half.
     err(&f.patch(&out_id, r#"{"payee_name": "Bank"}"#), 400);
@@ -249,17 +265,23 @@ fn splits() {
     assert_eq!(by_cat.as_array().unwrap().len(), 1);
 
     let bad = |body: String| err(&post(&f.s, &f.txns(), &body), 400);
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-06", "amount": -1, "subtransactions": [{{"amount": -2, "category_id": "{g}"}}]}}"#));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-06", "amount": -1, "subtransactions": [{{"amount": -2, "category_id": "{g}"}}]}}"#
+    ));
     bad(format!(
         r#"{{"account_id": "{c}", "date": "2026-10-06", "amount": -1, "category_id": "{g}", "subtransactions": [{{"amount": -1, "category_id": "{g}"}}]}}"#
     ));
-    bad(format!(r#"{{"account_id": "{}", "date": "2026-10-06", "amount": -1, "subtransactions": [{{"amount": -1, "category_id": "{g}"}}]}}"#, f.asset));
+    bad(format!(
+        r#"{{"account_id": "{}", "date": "2026-10-06", "amount": -1, "subtransactions": [{{"amount": -1, "category_id": "{g}"}}]}}"#,
+        f.asset
+    ));
 
     err(&f.patch(&sid, r#"{"amount": -1}"#), 400);
     err(&f.patch(&sid, r#"{"subtransactions": []}"#), 400);
     let t = expect(f.patch(&sid, &format!(r#"{{"subtransactions": [], "category_id": "{g}"}}"#)), 200);
     assert_eq!(t["subtransactions"], json!([]));
     assert_eq!(t["category_id"], g.as_str());
-    let t = expect(f.patch(&sid, &format!(r#"{{"subtransactions": [{{"amount": -90000, "category_id": "{h}"}}]}}"#)), 200);
+    let t =
+        expect(f.patch(&sid, &format!(r#"{{"subtransactions": [{{"amount": -90000, "category_id": "{h}"}}]}}"#)), 200);
     assert_eq!(t["category_id"], Value::Null);
 }

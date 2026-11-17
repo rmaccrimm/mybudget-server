@@ -1,10 +1,17 @@
 //! Payees (SPEC 6).
 
-use serde_json::Value;
+use axum::{
+    Json,
+    body::Bytes,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 
-use crate::error::{ApiError, ApiResult, created, no_content, ok};
-use crate::fields::{self, optional, parse_object, required};
-use crate::model::{Payee, Plan, Store, plan, plan_mut};
+use crate::AppState;
+use crate::error::ApiError;
+use crate::fields::{self, Body};
+use crate::model::{ById, Payee, Plan, new_id};
 
 /// Payees that aren't transfer payees have unique names (SPEC 6.2).
 fn check_name_free(plan: &Plan, name: &str, except: Option<&str>) -> Result<(), ApiError> {
@@ -14,52 +21,67 @@ fn check_name_free(plan: &Plan, name: &str, except: Option<&str>) -> Result<(), 
     }
 }
 
-pub fn list(store: &Store, plan_id: &str) -> ApiResult {
-    let plan = plan(&store.plans, plan_id)?;
-    ok(Value::Array(plan.payees.iter().map(Payee::to_json).collect()))
+pub async fn list(State(state): State<AppState>, Path(plan_id): Path<String>) -> Result<impl IntoResponse, ApiError> {
+    let store = state.store();
+    let plan = store.plan(&plan_id)?;
+    Ok(Json(plan.payees.values().cloned().collect::<Vec<_>>()))
 }
 
-pub fn get(store: &Store, plan_id: &str, payee_id: &str) -> ApiResult {
-    let plan = plan(&store.plans, plan_id)?;
-    let i = plan.payee_index(payee_id)?;
-    ok(plan.payees[i].to_json())
+pub async fn get(
+    State(state): State<AppState>,
+    Path((plan_id, payee_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = state.store();
+    Ok(Json(store.plan(&plan_id)?.payees.by_id(&payee_id)?.clone()))
 }
 
-pub fn create(store: &mut Store, plan_id: &str, body: &[u8]) -> ApiResult {
-    let plan = plan_mut(&mut store.plans, plan_id)?;
-    let obj = parse_object(body)?;
-    let name = fields::payee_name("name", required(&obj, "name")?)?;
+pub async fn create(
+    State(state): State<AppState>,
+    Path(plan_id): Path<String>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let plan = store.plan_mut(&plan_id)?;
+    let body = Body::parse(&body)?;
+    let name = body.required("name", fields::payee_name)?;
     check_name_free(plan, &name, None)?;
-    let payee = Payee { id: store.ids.next(), name, transfer_account_id: None };
-    let out = payee.to_json();
-    plan.payees.push(payee);
-    created(out)
+    let payee = Payee { id: new_id(), name, transfer_account_id: None };
+    plan.payees.insert(payee.id.clone(), payee.clone());
+    Ok((StatusCode::CREATED, Json(payee)))
 }
 
-pub fn update(store: &mut Store, plan_id: &str, payee_id: &str, body: &[u8]) -> ApiResult {
-    let plan = plan_mut(&mut store.plans, plan_id)?;
-    let i = plan.payee_index(payee_id)?;
-    let obj = parse_object(body)?;
-    let name = optional(&obj, "name", fields::payee_name)?;
-    if let Some(name) = name {
-        if plan.payees[i].is_transfer() {
+pub async fn update(
+    State(state): State<AppState>,
+    Path((plan_id, payee_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let plan = store.plan_mut(&plan_id)?;
+    let mut payee = plan.payees.by_id(&payee_id)?.clone();
+    let body = Body::parse(&body)?;
+    if let Some(name) = body.optional("name", fields::payee_name)? {
+        if payee.is_transfer() {
             return Err(ApiError::bad_request("a transfer payee's name follows its account"));
         }
-        check_name_free(plan, &name, Some(payee_id))?;
-        plan.payees[i].name = name;
+        check_name_free(plan, &name, Some(&payee_id))?;
+        payee.name = name;
     }
-    ok(plan.payees[i].to_json())
+    plan.payees.insert(payee_id, payee.clone());
+    Ok(Json(payee))
 }
 
-pub fn delete(store: &mut Store, plan_id: &str, payee_id: &str) -> ApiResult {
-    let plan = plan_mut(&mut store.plans, plan_id)?;
-    let i = plan.payee_index(payee_id)?;
-    if plan.payees[i].is_transfer() {
+pub async fn delete(
+    State(state): State<AppState>,
+    Path((plan_id, payee_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let plan = store.plan_mut(&plan_id)?;
+    if plan.payees.by_id(&payee_id)?.is_transfer() {
         return Err(ApiError::bad_request("a transfer payee can't be deleted"));
     }
-    if plan.payee_in_use(payee_id) {
+    if plan.payee_in_use(&payee_id) {
         return Err(ApiError::conflict("the payee is used by transactions"));
     }
-    plan.payees.remove(i);
-    no_content()
+    plan.payees.shift_remove(&payee_id);
+    Ok(StatusCode::NO_CONTENT)
 }

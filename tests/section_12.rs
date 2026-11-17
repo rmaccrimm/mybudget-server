@@ -30,7 +30,11 @@ impl Fx {
 
     fn assign(&self, month: &str, cat: &str, amount: i64) {
         expect(
-            patch(&self.s, &format!("/plans/{}/months/{month}/categories/{cat}", self.p), &format!(r#"{{"assigned": {amount}}}"#)),
+            patch(
+                &self.s,
+                &format!("/plans/{}/months/{month}/categories/{cat}", self.p),
+                &format!(r#"{{"assigned": {amount}}}"#),
+            ),
             200,
         );
     }

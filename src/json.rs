@@ -281,7 +281,10 @@ mod tests {
         assert_eq!(ok("-0"), Json::Number("-0".into()));
         assert_eq!(ok("1.5e3"), Json::Number("1.5e3".into()));
         assert_eq!(ok(r#""a\u00e9\ud83d\ude00\n\/""#), Json::String("aé😀\n/".into()));
-        assert_eq!(ok("[1, [], {}]"), Json::Array(vec![Json::Number("1".into()), Json::Array(vec![]), Json::Object(Object::new())]));
+        assert_eq!(
+            ok("[1, [], {}]"),
+            Json::Array(vec![Json::Number("1".into()), Json::Array(vec![]), Json::Object(Object::new())])
+        );
         let Json::Object(o) = ok(r#"{"a": 1, "a": 2, "$serde_json::private::RawValue": "x"}"#) else { panic!() };
         assert_eq!(o["a"], Json::Number("2".into()));
         ok(&format!("{}{}", "[".repeat(128), "]".repeat(128)));
@@ -290,9 +293,33 @@ mod tests {
     #[test]
     fn invalid_documents() {
         for s in [
-            "", " ", "{", "[1,]", "{\"a\":1,}", "01", "-", "1.", ".5", "1e", "+1", "tru", "nul", "\"\\x\"",
-            "\"\\ud800\"", "\"\\udc00\"", "\"\\ud800\\u0041\"", "\"a\u{1}\"", "1e400", "-1e400", "{} x",
-            "\u{feff}{}", "{'a': 1}", "[1 2]", "{\"a\" 1}", "NaN", "Infinity",
+            "",
+            " ",
+            "{",
+            "[1,]",
+            "{\"a\":1,}",
+            "01",
+            "-",
+            "1.",
+            ".5",
+            "1e",
+            "+1",
+            "tru",
+            "nul",
+            "\"\\x\"",
+            "\"\\ud800\"",
+            "\"\\udc00\"",
+            "\"\\ud800\\u0041\"",
+            "\"a\u{1}\"",
+            "1e400",
+            "-1e400",
+            "{} x",
+            "\u{feff}{}",
+            "{'a': 1}",
+            "[1 2]",
+            "{\"a\" 1}",
+            "NaN",
+            "Infinity",
         ] {
             assert!(parse(s.as_bytes()).is_err(), "{s:?} should fail");
         }

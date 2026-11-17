@@ -22,7 +22,8 @@ fn body_limits() {
     let ok = br#"{"name": "a", "x": [1e300, -0, 100000000000000000000000, "\\ud800", {"y": null}]}"#;
     assert_eq!(req(&s, "POST", "/plans", Some(ok)).status, 201);
     // Ignored fields may hold any JSON, including keys serde_json treats specially.
-    let magic = br#"{"name": "a", "x": {"$serde_json::private::RawValue": "nope"}, "y": {"$serde_json::private::Number": 1}}"#;
+    let magic =
+        br#"{"name": "a", "x": {"$serde_json::private::RawValue": "nope"}, "y": {"$serde_json::private::Number": 1}}"#;
     assert_eq!(req(&s, "POST", "/plans", Some(magic)).status, 201);
 
     let just_under = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat((1 << 20) - 22));
@@ -34,6 +35,38 @@ fn body_limits() {
     err(&req(&s, "POST", "/plans", Some(huge.as_bytes())), 413);
     err(&req(&s, "PATCH", "/plans/nope", Some(huge.as_bytes())), 413);
     assert_eq!(req(&s, "GET", "/plans", None).json().as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn routing() {
+    let s = start();
+    let id = new_plan(&s);
+    for path in ["/plans/", "//plans", "/plans//accounts", "/health/", "/plans/x/months//categories/y"] {
+        err(&get(&s, path), 404);
+    }
+    // 405 before 404, with the methods the path takes.
+    for (method, path) in [("PUT", "/plans/nope"), ("GET", "/plans/nope/category_groups"), ("FOO", "/plans")] {
+        let r = req(&s, method, path, None);
+        err(&r, 405);
+        assert!(r.headers.to_ascii_lowercase().contains("\r\nallow: "), "{}", r.headers);
+    }
+    let r = req(&s, "DELETE", "/plans", None);
+    let allow = r.headers.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("allow: ").map(str::to_owned));
+    let mut allow: Vec<String> = allow.unwrap().split(',').map(|m| m.trim().to_owned()).collect();
+    allow.sort();
+    assert_eq!(allow, ["get", "head", "post"]);
+    // HEAD is GET without the body.
+    let r = req(&s, "HEAD", &format!("/plans/{id}"), None);
+    assert_eq!((r.status, r.body.as_str()), (200, ""));
+    assert_eq!(req(&s, "HEAD", "/plans/nope", None).status, 404);
+    // 413 wins over everything, including the fallbacks.
+    let huge = vec![b'x'; 2 << 20];
+    err(&req(&s, "POST", "/nope", Some(&huge)), 413);
+    err(&req(&s, "PUT", "/plans", Some(&huge)), 413);
+    // Query parameters are percent-decoded; unknown ones are ignored.
+    let path = format!("/plans/{id}/transactions?since_date=2026%2D01%2D01&x=%ZZ&approved=true");
+    assert_eq!(expect(get(&s, &path), 200), serde_json::json!([]));
+    err(&get(&s, &format!("/plans/{id}/transactions?since_date=2026-01-01&since_date=2026-02-30")), 400);
 }
 
 #[test]
@@ -74,7 +107,10 @@ fn plans_crud_and_errors() {
     assert_eq!(req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{long}"}}"#).as_bytes())).status, 201);
     err(&req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{long}x"}}"#).as_bytes())), 400);
     // Paired surrogates are fine.
-    assert_eq!(req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{}ud83d{}ude00"}}"#, '\\', '\\').as_bytes())).status, 201);
+    assert_eq!(
+        req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{}ud83d{}ude00"}}"#, '\\', '\\').as_bytes())).status,
+        201
+    );
 
     let list = req(&s, "GET", "/plans", None).json();
     assert_eq!(list.as_array().unwrap().len(), 3);

@@ -1,5 +1,11 @@
 //! Request body parsing and field validation (SPEC 3.1, 3.6 to 3.10).
+//!
+//! Each check takes the field's name, for its error message, and its JSON
+//! value, and returns the value it stands for or a 400.
 
+use serde::de::{DeserializeOwned, IntoDeserializer, value};
+
+use crate::calendar;
 use crate::error::ApiError;
 use crate::json::{self, Json, Object};
 
@@ -12,51 +18,90 @@ pub const MAX_PAYEE_NAME: usize = 200;
 /// Longest note or memo (SPEC 3.9).
 pub const MAX_NOTE: usize = 500;
 
-fn bad(message: impl Into<String>) -> ApiError {
-    ApiError::bad_request(message)
-}
+/// A JSON object from a request, read field by field.
+pub struct Body(Object);
 
-/// Parses a POST/PATCH body, which must be a JSON object (SPEC 3.1, 3.4).
-pub fn parse_object(body: &[u8]) -> Result<Object, ApiError> {
-    match json::parse(body).map_err(bad)? {
-        Json::Object(map) => Ok(map),
-        _ => Err(bad("the body must be a JSON object")),
+impl Body {
+    /// Parses a POST/PATCH body, which must be a JSON object (SPEC 3.1, 3.4).
+    pub fn parse(bytes: &[u8]) -> Result<Self, ApiError> {
+        match json::parse(bytes).map_err(ApiError::bad_request)? {
+            Json::Object(map) => Ok(Self(map)),
+            _ => Err(ApiError::bad_request("the body must be a JSON object")),
+        }
+    }
+
+    /// A JSON object nested in a body, such as a subtransaction, copied out
+    /// so it can be read the same way.
+    pub fn object(field: &str, v: &Json) -> Result<Self, ApiError> {
+        match v {
+            Json::Object(map) => Ok(Self(map.clone())),
+            _ => Err(ApiError::bad_request(format!("{field} must be an object"))),
+        }
+    }
+
+    /// A field that must be present, checked by `check`.
+    pub fn required<'a, T>(
+        &'a self,
+        key: &str,
+        check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
+    ) -> Result<T, ApiError> {
+        self.optional(key, check)?.ok_or_else(|| missing(key))
+    }
+
+    /// A field checked by `check` whenever it is present (SPEC 3.6).
+    pub fn optional<'a, T>(
+        &'a self,
+        key: &str,
+        check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
+    ) -> Result<Option<T>, ApiError> {
+        self.0.get(key).map(|v| check(key, v)).transpose()
     }
 }
 
-/// A field that must be present.
-pub fn required<'a>(obj: &'a Object, key: &str) -> Result<&'a Json, ApiError> {
-    obj.get(key).ok_or_else(|| bad(format!("{key} is required")))
+/// The error for a required field that isn't there.
+pub fn missing(key: &str) -> ApiError {
+    ApiError::bad_request(format!("{key} is required"))
 }
 
-/// Validates a field when it is present (SPEC 3.6).
-pub fn optional<'a, T>(
-    obj: &'a Object,
-    key: &str,
+/// A nullable field (SPEC 3.10): `null` is `None`, and anything else must
+/// pass `check`.
+pub fn nullable<'a, T>(
     check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
-) -> Result<Option<T>, ApiError> {
-    obj.get(key).map(|v| check(key, v)).transpose()
+) -> impl FnOnce(&str, &'a Json) -> Result<Option<T>, ApiError> {
+    move |field, v| match v {
+        Json::Null => Ok(None),
+        _ => check(field, v).map(Some),
+    }
 }
 
-pub fn string<'a>(field: &str, v: &'a Json) -> Result<&'a str, ApiError> {
+pub fn string(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
-        Json::String(s) => Ok(s),
-        _ => Err(bad(format!("{field} must be a string"))),
+        Json::String(s) => Ok(s.clone()),
+        _ => Err(ApiError::bad_request(format!("{field} must be a string"))),
     }
+}
+
+/// One of the wire names of the serde enum `T`, such as an account type.
+pub fn variant<T: DeserializeOwned>(field: &str, v: &Json) -> Result<T, ApiError> {
+    let Json::String(s) = v else {
+        return Err(ApiError::bad_request(format!("{field} must be a string")));
+    };
+    T::deserialize(s.as_str().into_deserializer())
+        .map_err(|e: value::Error| ApiError::bad_request(format!("{field}: {e}")))
 }
 
 /// A name of 1 to `max` scalar values, not all whitespace (SPEC 3.9).
-pub fn name_of_length(field: &str, v: &Json, max: usize) -> Result<String, ApiError> {
+fn name_of_length(field: &str, v: &Json, max: usize) -> Result<String, ApiError> {
     let s = string(field, v)?;
     let len = s.chars().count();
     if len == 0 || len > max {
-        return Err(bad(format!("{field} must have 1 to {max} characters")));
+        return Err(ApiError::bad_request(format!("{field} must have 1 to {max} characters")));
     }
     // char::is_whitespace is Unicode's White_Space property.
     if s.chars().all(char::is_whitespace) {
-        return Err(bad(format!("{field} must not be only whitespace")));
+        return Err(ApiError::bad_request(format!("{field} must not be only whitespace")));
     }
-    Ok(s.to_owned())
+    Ok(s)
 }
 
 pub fn name(field: &str, v: &Json) -> Result<String, ApiError> {
@@ -67,19 +112,23 @@ pub fn payee_name(field: &str, v: &Json) -> Result<String, ApiError> {
     name_of_length(field, v, MAX_PAYEE_NAME)
 }
 
-/// A note or memo: `null` or at most 500 scalar values (SPEC 3.9).
-pub fn note(field: &str, v: &Json) -> Result<Option<String>, ApiError> {
+/// The text of a note or memo: at most 500 scalar values (SPEC 3.9).
+fn note_text(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
-        Json::Null => Ok(None),
-        Json::String(s) if s.chars().count() <= MAX_NOTE => Ok(Some(s.clone())),
-        _ => Err(bad(format!("{field} must be null or a string of at most {MAX_NOTE} characters"))),
+        Json::String(s) if s.chars().count() <= MAX_NOTE => Ok(s.clone()),
+        _ => Err(ApiError::bad_request(format!("{field} must be null or a string of at most {MAX_NOTE} characters"))),
     }
+}
+
+/// A note or memo: `null` or its text (SPEC 3.9).
+pub fn note(field: &str, v: &Json) -> Result<Option<String>, ApiError> {
+    nullable(note_text)(field, v)
 }
 
 pub fn boolean(field: &str, v: &Json) -> Result<bool, ApiError> {
     match v {
         Json::Bool(b) => Ok(*b),
-        _ => Err(bad(format!("{field} must be true or false"))),
+        _ => Err(ApiError::bad_request(format!("{field} must be true or false"))),
     }
 }
 
@@ -92,69 +141,33 @@ pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
     };
     match parsed {
         Some(n) if (-MAX_AMOUNT..=MAX_AMOUNT).contains(&n) => Ok(n),
-        _ => Err(bad(format!("{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"))),
+        _ => Err(ApiError::bad_request(format!("{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"))),
     }
 }
 
-fn is_leap(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-}
-
-pub fn days_in_month(year: u32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-/// Parses `n` ASCII digits.
-fn digits(s: &[u8]) -> Option<u32> {
-    s.iter().try_fold(0u32, |acc, &b| b.is_ascii_digit().then(|| acc * 10 + u32::from(b - b'0')))
-}
-
-/// Parses a month `YYYY-MM` from `1900-01` to `2999-12` (SPEC 3.8).
-pub fn parse_month(s: &str) -> Option<(u32, u32)> {
-    let b = s.as_bytes();
-    if b.len() != 7 || b[4] != b'-' {
-        return None;
-    }
-    let year = digits(&b[..4])?;
-    let month = digits(&b[5..7])?;
-    ((1900..=2999).contains(&year) && (1..=12).contains(&month)).then_some((year, month))
-}
-
-/// Parses a real calendar date `YYYY-MM-DD` from `1900-01-01` to
-/// `2999-12-31` (SPEC 3.8).
-pub fn parse_date(s: &str) -> Option<(u32, u32, u32)> {
-    let b = s.as_bytes();
-    if b.len() != 10 || b[7] != b'-' {
-        return None;
-    }
-    let (year, month) = parse_month(&s[..7])?;
-    let day = digits(&b[8..10])?;
-    (1..=days_in_month(year, month)).contains(&day).then_some((year, month, day))
+/// The error for a date that isn't one (SPEC 3.8).
+pub fn invalid_date(field: &str) -> ApiError {
+    ApiError::bad_request(format!("{field} must be a date YYYY-MM-DD from 1900-01-01 to 2999-12-31"))
 }
 
 pub fn date(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
-        Json::String(s) if parse_date(s).is_some() => Ok(s.clone()),
-        _ => Err(bad(format!("{field} must be a date YYYY-MM-DD from 1900-01-01 to 2999-12-31"))),
+        Json::String(s) if calendar::is_date(s) => Ok(s.clone()),
+        _ => Err(invalid_date(field)),
     }
 }
 
 pub fn currency(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
         Json::String(s) if s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase()) => Ok(s.clone()),
-        _ => Err(bad(format!("{field} must be three uppercase ASCII letters"))),
+        _ => Err(ApiError::bad_request(format!("{field} must be three uppercase ASCII letters"))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AccountType, FlagColor};
 
     fn num(s: &str) -> Json {
         Json::Number(s.into())
@@ -173,19 +186,13 @@ mod tests {
     }
 
     #[test]
-    fn dates() {
-        for good in ["1900-01-01", "2999-12-31", "2024-02-29", "2000-02-29", "2026-10-31"] {
-            assert!(parse_date(good).is_some(), "{good}");
-        }
-        for bad in [
-            "1899-12-31", "3000-01-01", "2100-02-29", "2026-02-29", "2026-04-31", "2026-13-01", "2026-00-10",
-            "2026-01-00", "2026-1-01", "2026/01/01", "2026-01-01T00:00", " 2026-01-01", "+026-01-01", "２０２６-01-01",
-            "",
-        ] {
-            assert!(parse_date(bad).is_none(), "{bad}");
-        }
-        assert!(parse_month("2026-10").is_some());
-        assert!(parse_month("1899-12").is_none());
-        assert!(parse_month("2026-1").is_none());
+    fn variants() {
+        let s = |s: &str| Json::String(s.into());
+        assert_eq!(variant::<AccountType>("type", &s("creditCard")).unwrap(), AccountType::CreditCard);
+        let err = variant::<AccountType>("type", &s("credit_card")).unwrap_err();
+        assert!(err.message.contains("lineOfCredit"), "{}", err.message);
+        assert!(variant::<AccountType>("type", &Json::Null).is_err());
+        assert_eq!(nullable(variant)("flag_color", &Json::Null).unwrap(), None::<FlagColor>);
+        assert_eq!(nullable(variant)("flag_color", &s("red")).unwrap(), Some(FlagColor::Red));
     }
 }

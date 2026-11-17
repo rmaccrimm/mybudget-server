@@ -43,7 +43,11 @@ fn setup(starting: i64) -> Fixture {
 impl Fixture {
     fn assign(&self, month: &str, cat: &str, amount: i64) -> Value {
         expect(
-            patch(&self.s, &format!("/plans/{}/months/{month}/categories/{cat}", self.p), &format!(r#"{{"assigned": {amount}}}"#)),
+            patch(
+                &self.s,
+                &format!("/plans/{}/months/{month}/categories/{cat}", self.p),
+                &format!(r#"{{"assigned": {amount}}}"#),
+            ),
             200,
         )
     }
@@ -123,7 +127,11 @@ fn income_only_counts_cash_lines_and_splits() {
     let f = setup(0);
     let p = &f.p;
     let tracking = id(&expect(
-        post(&f.s, &format!("/plans/{p}/accounts"), r#"{"name": "House", "type": "otherAsset", "starting_balance": 9000, "starting_date": "2026-10-02"}"#),
+        post(
+            &f.s,
+            &format!("/plans/{p}/accounts"),
+            r#"{"name": "House", "type": "otherAsset", "starting_balance": 9000, "starting_date": "2026-10-02"}"#,
+        ),
         201,
     ));
     let _ = tracking;
