@@ -8,8 +8,8 @@ use std::process::{Child, Command, Stdio};
 use serde_json::Value;
 
 pub struct Server {
-    child: Child,
-    addr: String,
+    pub child: Child,
+    pub addr: String,
 }
 
 impl Drop for Server {
@@ -19,11 +19,16 @@ impl Drop for Server {
 }
 
 pub fn start() -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mybudget-server"))
-        .env("MYBUDGET_ADDR", "127.0.0.1:0")
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    start_with(|_| {})
+}
+
+/// Starts the server after letting `configure` adjust its command, such as
+/// its environment or stdin.
+pub fn start_with(configure: impl FnOnce(&mut Command)) -> Server {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mybudget-server"));
+    command.env("MYBUDGET_ADDR", "127.0.0.1:0").stdout(Stdio::piped());
+    configure(&mut command);
+    let mut child = command.spawn().unwrap();
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let addr = line.trim().strip_prefix("listening on ").unwrap().to_string();
