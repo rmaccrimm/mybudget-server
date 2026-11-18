@@ -1,3 +1,4 @@
+use std::io::{ErrorKind, Read};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -21,11 +22,26 @@ async fn main() -> std::io::Result<()> {
 /// discarded. A blocking thread is the simplest way to wait on stdin; the
 /// process exits outright rather than shutting down gracefully, since an open
 /// connection could otherwise keep it alive past the one-second limit.
+///
+/// `std::io::copy` won't do here: the parent may hand over a non-blocking pipe
+/// or socket, where a read with nothing waiting fails with `WouldBlock`, and
+/// that isn't end of file. Such a read is retried after a short pause, well
+/// inside the one-second limit; other read errors end the server, since the
+/// parent can then no longer be heard from (SPEC 1.4 leaves that case open).
 fn exit_on_stdin_eof() {
+    const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
     std::thread::spawn(|| {
-        // `copy` returns at end of file, or on a read error, which also means
-        // the parent can no longer be heard from.
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let mut stdin = std::io::stdin().lock();
+        let mut discard = [0; 4096];
+        loop {
+            match stdin.read(&mut discard) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(RETRY_PAUSE),
+                Err(_) => break,
+            }
+        }
         std::process::exit(0);
     });
 }
