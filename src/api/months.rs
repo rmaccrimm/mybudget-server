@@ -46,12 +46,15 @@ pub async fn update_category(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
-    plan.categories.by_id(&category_id)?;
+    store.plan(&plan_id)?.categories.by_id(&category_id)?;
     let m = month(&month_str)?;
     let body = Body::parse(&body)?;
-    if let Some(assigned) = body.optional("assigned", fields::amount)? {
-        plan.assigned.entry(category_id.clone()).or_default().insert(m, assigned);
-    }
-    Ok(Json(Budget::new(plan).entry(&category_id, m)))
+    let assigned = body.optional("assigned", fields::amount)?;
+    let entry = store.change_plan(&plan_id, |plan| {
+        if let Some(assigned) = assigned {
+            plan.assigned.entry(category_id.clone()).or_default().insert(m, assigned);
+        }
+        Budget::new(plan).entry(&category_id, m)
+    })?;
+    Ok(Json(entry))
 }

@@ -35,12 +35,15 @@ pub async fn create_group(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let name = body.required("name", fields::name)?;
     let group = Group { id: new_id(), name, hidden: false, internal: false };
-    plan.groups.insert(group.id.clone(), group.clone());
-    Ok((StatusCode::CREATED, Json(plan.group_view(&group))))
+    let view = store.change_plan(&plan_id, |plan| {
+        plan.groups.insert(group.id.clone(), group.clone());
+        plan.group_view(&group)
+    })?;
+    Ok((StatusCode::CREATED, Json(view)))
 }
 
 pub async fn get_group(
@@ -58,7 +61,7 @@ pub async fn update_group(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let mut group = plan.groups.by_id(&group_id)?.clone();
     let body = Body::parse(&body)?;
     let name = body.optional("name", fields::name)?;
@@ -72,8 +75,10 @@ pub async fn update_group(
     if let Some(hidden) = hidden {
         group.hidden = hidden;
     }
-    let view = plan.group_view(&group);
-    plan.groups.insert(group_id, group);
+    let view = store.change_plan(&plan_id, |plan| {
+        plan.groups.insert(group_id, group.clone());
+        plan.group_view(&group)
+    })?;
     Ok(Json(view))
 }
 
@@ -82,14 +87,14 @@ pub async fn delete_group(
     Path((plan_id, group_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     if plan.groups.by_id(&group_id)?.internal {
         return Err(ApiError::bad_request("the Credit Card Payments group can't be deleted"));
     }
     if plan.group_categories(&group_id).next().is_some() {
         return Err(ApiError::conflict("the group has categories"));
     }
-    plan.groups.shift_remove(&group_id);
+    store.change_plan(&plan_id, |plan| plan.groups.shift_remove(&group_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -101,14 +106,14 @@ pub async fn create(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let group = own_group(plan, &body.required("group_id", fields::string)?)?;
     let name = body.required("name", fields::name)?;
     let note = body.optional("note", fields::note)?.flatten();
     let category =
         Category { id: new_id(), group_id: group.id.clone(), name, hidden: false, note, payment_account_id: None };
-    plan.categories.insert(category.id.clone(), category.clone());
+    store.change_plan(&plan_id, |plan| plan.categories.insert(category.id.clone(), category.clone()))?;
     Ok((StatusCode::CREATED, Json(category)))
 }
 
@@ -126,7 +131,7 @@ pub async fn update(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let mut category = plan.categories.by_id(&category_id)?.clone();
     let body = Body::parse(&body)?;
     let name = body.optional("name", fields::name)?;
@@ -154,12 +159,15 @@ pub async fn update(
         category.hidden = hidden;
     }
 
-    // A moved category goes to the end of its new group (SPEC 7.6): the end
-    // of the plan's categories, since a group lists them in their order.
-    if moved {
-        plan.categories.shift_remove(&category_id);
-    }
-    plan.categories.insert(category_id, category.clone());
+    store.change_plan(&plan_id, |plan| {
+        // A moved category goes to the end of its new group (SPEC 7.6): the
+        // end of the plan's categories, since a group lists them in their
+        // order.
+        if moved {
+            plan.categories.shift_remove(&category_id);
+        }
+        plan.categories.insert(category_id, category.clone())
+    })?;
     Ok(Json(category))
 }
 
@@ -181,7 +189,7 @@ pub async fn delete(
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     // A payment category goes only with its account (SPEC 13.1).
     if plan.categories.by_id(&category_id)?.payment_account_id.is_some() {
         return Err(ApiError::bad_request("a payment category can't be deleted"));
@@ -194,6 +202,6 @@ pub async fn delete(
     if reassign_to.is_none() && plan.category_in_use(&category_id) {
         return Err(ApiError::conflict("category is in use"));
     }
-    plan.delete_category(&category_id, reassign_to.as_deref());
+    store.change_plan(&plan_id, |plan| plan.delete_category(&category_id, reassign_to.as_deref()))?;
     Ok(StatusCode::NO_CONTENT)
 }

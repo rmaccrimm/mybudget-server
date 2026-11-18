@@ -12,14 +12,23 @@ pub struct Server {
     pub addr: String,
 }
 
+/// Kills the server with `SIGKILL`, and waits for it to go.
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
 pub fn start() -> Server {
     start_with(|_| {})
+}
+
+/// Starts the server with `MYBUDGET_DATA` set to `dir`.
+pub fn start_on(dir: &std::path::Path) -> Server {
+    start_with(|c| {
+        c.env("MYBUDGET_DATA", dir);
+    })
 }
 
 /// Starts the server after letting `configure` adjust its command, such as

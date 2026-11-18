@@ -26,16 +26,23 @@ mod error;
 mod fields;
 mod json;
 mod model;
+mod persistence;
+mod store;
 
 use api::{accounts, categories, months, payees, plans, transactions};
 use error::ApiError;
-use model::Store;
+pub use persistence::migrate;
+pub use store::Store;
 
 /// The state handlers share: the store, behind one lock.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState(Arc<Mutex<Store>>);
 
 impl AppState {
+    pub fn new(store: Store) -> Self {
+        Self(Arc::new(Mutex::new(store)))
+    }
+
     /// Locks the store for the rest of the request, so requests behave as if
     /// handled one at a time (SPEC 3.11).
     fn store(&self) -> MutexGuard<'_, Store> {
@@ -43,10 +50,18 @@ impl AppState {
         // the data can't be trusted after that.
         self.0.lock().expect("no handler panicked while holding the store")
     }
+
+    /// Exits the process with status 0 once no request holds the store, so
+    /// that exiting never cuts a save short (SPEC 1.4, 15.5).
+    pub fn exit(&self) -> ! {
+        // Held until the process ends; a poisoned lock is held all the same.
+        let _store = self.0.lock();
+        std::process::exit(0)
+    }
 }
 
 /// Builds the application router.
-pub fn app() -> Router {
+pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/plans", get(plans::list).post(plans::create))
@@ -78,7 +93,7 @@ pub fn app() -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(read_body))
-        .with_state(AppState::default())
+        .with_state(state)
 }
 
 async fn health() -> &'static str {

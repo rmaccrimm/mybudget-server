@@ -4,9 +4,6 @@
 //! first. `shift_remove` keeps that order when something is deleted.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -26,15 +23,10 @@ pub fn transfer_payee_name(account_name: &str) -> String {
     format!("Transfer : {account_name}")
 }
 
-/// A new id, unique across the server and never reused (SPEC 3.5): the
-/// server's start time in hex, then a counter.
+/// A new id: a random version 4 UUID in lowercase with hyphens, so ids made
+/// by different servers don't collide (SPEC 3.5).
 pub fn new_id() -> String {
-    static PREFIX: LazyLock<String> = LazyLock::new(|| {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        format!("{:x}", nanos as u64)
-    });
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!("{}-{}", *PREFIX, NEXT.fetch_add(1, Ordering::Relaxed))
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Objects by id, oldest first.
@@ -54,21 +46,6 @@ impl<T> ById<T> for Table<T> {
 
     fn by_id_mut(&mut self, id: &str) -> Result<&mut T, ApiError> {
         self.get_mut(id).ok_or_else(ApiError::not_found)
-    }
-}
-
-#[derive(Default)]
-pub struct Store {
-    pub plans: Table<Plan>,
-}
-
-impl Store {
-    pub fn plan(&self, id: &str) -> Result<&Plan, ApiError> {
-        self.plans.by_id(id)
-    }
-
-    pub fn plan_mut(&mut self, id: &str) -> Result<&mut Plan, ApiError> {
-        self.plans.by_id_mut(id)
     }
 }
 
@@ -104,7 +81,7 @@ impl AccountType {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -134,7 +111,7 @@ pub struct AccountView {
     balances: Balances,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Payee {
     pub id: String,
     pub name: String,
@@ -148,7 +125,7 @@ impl Payee {
 }
 
 /// A category group. Its categories are the ones whose `group_id` names it.
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Group {
     pub id: String,
     pub name: String,
@@ -164,7 +141,7 @@ pub struct GroupView {
     categories: Vec<Category>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Category {
     pub id: String,
     pub group_id: String,
@@ -204,14 +181,14 @@ pub enum FlagColor {
     Purple,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Subtransaction {
     pub amount: i64,
     pub category_id: String,
     pub memo: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize)]
 pub struct Transaction {
     pub id: String,
     pub account_id: String,
@@ -254,15 +231,23 @@ impl Transaction {
 // Plans
 
 /// What the API shows of a plan (SPEC 4.1).
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct PlanInfo {
     pub id: String,
     pub name: String,
     pub currency_code: String,
 }
 
+/// Each category's assigned amounts by month (SPEC 11.2); a month missing
+/// from a category's map has 0 assigned.
+pub type Assigned = HashMap<String, BTreeMap<Month, i64>>;
+
+#[derive(Clone, Debug)]
 pub struct Plan {
     pub info: PlanInfo,
+    /// When the plan was created, in microseconds since the Unix epoch.
+    /// Plans are listed in this order (SPEC 4.2, 15.5).
+    pub created_at: i64,
     pub accounts: Table<Account>,
     /// Transfer payees included.
     pub payees: Table<Payee>,
@@ -273,23 +258,22 @@ pub struct Plan {
     /// categories in this order lists them in its order (SPEC 7.6).
     pub categories: Table<Category>,
     pub transactions: Table<Transaction>,
-    /// Each category's assigned amounts by month (SPEC 11.2); a month
-    /// missing from the map has 0 assigned.
-    pub assigned: HashMap<String, BTreeMap<Month, i64>>,
+    pub assigned: Assigned,
 }
 
 impl Plan {
-    pub fn new(name: String, currency_code: String) -> Self {
+    pub fn new(name: String, currency_code: String, created_at: i64) -> Self {
         let id = new_id();
         let internal = Group { id: new_id(), name: CREDIT_CARD_PAYMENTS.into(), hidden: false, internal: true };
         Self {
             info: PlanInfo { id, name, currency_code },
+            created_at,
             accounts: Table::new(),
             payees: Table::new(),
             groups: Table::from([(internal.id.clone(), internal)]),
             categories: Table::new(),
             transactions: Table::new(),
-            assigned: HashMap::new(),
+            assigned: Assigned::new(),
         }
     }
 

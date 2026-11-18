@@ -355,7 +355,7 @@ pub async fn create(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let input = Input::parse(plan, &body)?;
     let account_id = input.account_id.ok_or_else(|| fields::missing("account_id"))?;
@@ -384,13 +384,17 @@ pub async fn create(
     let (category, other_category) = place_category(transfer.as_ref(), d.category);
     t.category_id = category;
 
-    // Everything is checked: from here on nothing fails (SPEC 3.11).
-    t.payee_id = resolve_payee(plan, d.payee);
-    plan.transactions.insert(t.id.clone(), t.clone());
-    if let Some(mut half) = half {
-        half.category_id = other_category;
-        plan.transactions.insert(half.id.clone(), half);
-    }
+    // Everything is checked: from here on only the save can fail
+    // (SPEC 3.11, 15.10).
+    let t = store.change_plan(&plan_id, |plan| {
+        t.payee_id = resolve_payee(plan, d.payee);
+        plan.transactions.insert(t.id.clone(), t.clone());
+        if let Some(mut half) = half {
+            half.category_id = other_category;
+            plan.transactions.insert(half.id.clone(), half);
+        }
+        t
+    })?;
     Ok((StatusCode::CREATED, Json(t)))
 }
 
@@ -408,7 +412,7 @@ pub async fn update(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let mut t = plan.transactions.by_id(&transaction_id)?.clone();
     let body = Body::parse(&body)?;
     let input = Input::parse(plan, &body)?;
@@ -449,23 +453,27 @@ pub async fn update(
     let (category, other_category) = place_category(transfer.as_ref(), d.category);
     t.category_id = category;
 
-    // Everything is checked: from here on nothing fails (SPEC 3.11).
-    if let Some(id) = dropped_partner {
-        plan.transactions.shift_remove(&id);
-    }
-    t.payee_id = resolve_payee(plan, d.payee);
-    if keeps_partner {
-        // Date and amount follow on the other half (SPEC 9.4).
-        let id = t.transfer_transaction_id.as_ref().expect("a transfer links its other half");
-        let partner = plan.transactions.get_mut(id).expect("a transfer's other half exists");
-        partner.date = t.date.clone();
-        partner.amount = -t.amount;
-        partner.category_id = other_category;
-    } else if let Some(mut half) = new_half {
-        half.category_id = other_category;
-        plan.transactions.insert(half.id.clone(), half);
-    }
-    plan.transactions.insert(t.id.clone(), t.clone());
+    // Everything is checked: from here on only the save can fail
+    // (SPEC 3.11, 15.10).
+    let t = store.change_plan(&plan_id, |plan| {
+        if let Some(id) = dropped_partner {
+            plan.transactions.shift_remove(&id);
+        }
+        t.payee_id = resolve_payee(plan, d.payee);
+        if keeps_partner {
+            // Date and amount follow on the other half (SPEC 9.4).
+            let id = t.transfer_transaction_id.as_ref().expect("a transfer links its other half");
+            let partner = plan.transactions.get_mut(id).expect("a transfer's other half exists");
+            partner.date = t.date.clone();
+            partner.amount = -t.amount;
+            partner.category_id = other_category;
+        } else if let Some(mut half) = new_half {
+            half.category_id = other_category;
+            plan.transactions.insert(half.id.clone(), half);
+        }
+        plan.transactions.insert(t.id.clone(), t.clone());
+        t
+    })?;
     Ok(Json(t))
 }
 
@@ -474,13 +482,15 @@ pub async fn delete(
     Path((plan_id, transaction_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
-    let t = plan.transactions.by_id(&transaction_id)?;
+    let t = store.plan(&plan_id)?.transactions.by_id(&transaction_id)?;
     // Deleting either half of a transfer deletes both (SPEC 9.6).
-    if let Some(partner) = t.transfer_transaction_id.clone() {
-        plan.transactions.shift_remove(&partner);
-    }
-    plan.transactions.shift_remove(&transaction_id);
+    let partner = t.transfer_transaction_id.clone();
+    store.change_plan(&plan_id, |plan| {
+        if let Some(partner) = partner {
+            plan.transactions.shift_remove(&partner);
+        }
+        plan.transactions.shift_remove(&transaction_id);
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

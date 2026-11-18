@@ -35,7 +35,7 @@ pub async fn create(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let name = body.required("name", fields::name)?;
     let kind = body.required("type", fields::variant)?;
@@ -51,8 +51,11 @@ pub async fn create(
             return Err(ApiError::bad_request("starting_date is required when starting_balance isn't 0"));
         }
     };
-    let id = plan.create_account(name, kind, note, starting);
-    Ok((StatusCode::CREATED, Json(plan.account_view(&id))))
+    let view = store.change_plan(&plan_id, |plan| {
+        let id = plan.create_account(name, kind, note, starting);
+        plan.account_view(&id)
+    })?;
+    Ok((StatusCode::CREATED, Json(view)))
 }
 
 pub async fn update(
@@ -61,7 +64,7 @@ pub async fn update(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     let account = plan.accounts.by_id(&account_id)?;
     let body = Body::parse(&body)?;
     let name = body.optional("name", fields::name)?;
@@ -74,17 +77,20 @@ pub async fn update(
         return Err(ApiError::conflict("an account can only be closed when its balance is 0"));
     }
 
-    let account = plan.accounts.get_mut(&account_id).expect("found above");
-    if let Some(note) = note {
-        account.note = note;
-    }
-    if let Some(closed) = closed {
-        account.closed = closed;
-    }
-    if let Some(name) = name {
-        plan.rename_account(&account_id, name);
-    }
-    Ok(Json(plan.account_view(&account_id)))
+    let view = store.change_plan(&plan_id, |plan| {
+        let account = plan.accounts.get_mut(&account_id).expect("found above");
+        if let Some(note) = note {
+            account.note = note;
+        }
+        if let Some(closed) = closed {
+            account.closed = closed;
+        }
+        if let Some(name) = name {
+            plan.rename_account(&account_id, name);
+        }
+        plan.account_view(&account_id)
+    })?;
+    Ok(Json(view))
 }
 
 pub async fn delete(
@@ -92,11 +98,11 @@ pub async fn delete(
     Path((plan_id, account_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut store = state.store();
-    let plan = store.plan_mut(&plan_id)?;
+    let plan = store.plan(&plan_id)?;
     plan.accounts.by_id(&account_id)?;
     if plan.account_has_transactions(&account_id) {
         return Err(ApiError::conflict("the account has transactions"));
     }
-    plan.delete_account(&account_id);
+    store.change_plan(&plan_id, |plan| plan.delete_account(&account_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
