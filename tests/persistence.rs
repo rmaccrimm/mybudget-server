@@ -213,6 +213,54 @@ fn files_are_named_after_plans() {
 }
 
 #[test]
+fn journal_files_left_beside_a_plan_file_are_gone_once_it_starts() {
+    let stale: [(&str, &[u8]); 7] = [
+        ("-journal", b""),
+        ("-journal", &[0; 512]),
+        ("-journal", b"junk"),
+        ("-wal", b""),
+        ("-shm", b""),
+        ("-shm", &[0; 32768]),
+        ("-shm", b"junk"),
+    ];
+    for (suffix, bytes) in stale {
+        let dir = data_dir();
+        let s = start_on(dir.path());
+        let plan = id(&new_named_plan(&s, "Household"));
+        let before = snapshot(&s, &plan);
+        drop(s);
+        fs::write(dir.path().join(format!("Household.sqlite{suffix}")), bytes).unwrap();
+        let s = start_on(dir.path());
+        assert_eq!(files(dir.path()), ["Household.sqlite"], "{suffix} of {} bytes", bytes.len());
+        assert_eq!(snapshot(&s, &plan), before);
+    }
+}
+
+#[test]
+fn a_plan_file_in_wal_mode_is_served_and_leaves_no_wal() {
+    let dir = data_dir();
+    let s = start_on(dir.path());
+    let plan = id(&new_named_plan(&s, "Household"));
+    drop(s);
+    let file = dir.path().join("Household.sqlite");
+    // Closing without a checkpoint leaves the change in the WAL only.
+    let conn = Connection::open(&file).unwrap();
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn.execute("UPDATE plan SET name = 'Changed'", []).unwrap();
+    drop(conn);
+    assert!(files(dir.path()).contains(&"Household.sqlite-wal".to_owned()));
+
+    let s = start_on(dir.path());
+    assert_eq!(files(dir.path()), ["Household.sqlite"]);
+    assert_eq!(expect(get(&s, &format!("/plans/{plan}")), 200)["name"], "Changed");
+    expect(post(&s, &format!("/plans/{plan}/payees"), r#"{"name": "Shop"}"#), 201);
+    assert_eq!(files(dir.path()), ["Household.sqlite"]);
+    let mode: String = Connection::open(&file).unwrap().query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+    assert_eq!(mode, "delete");
+}
+
+#[test]
 fn files_it_cant_use_are_skipped_and_left_alone() {
     let dir = data_dir();
     let s = start_on(dir.path());

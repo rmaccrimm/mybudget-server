@@ -3,8 +3,10 @@
 //! Each plan is kept in a SQLite file of its own. A connection is opened for
 //! each save and closed after it, so nothing holds a file open between
 //! requests, a file can be renamed or deleted at any time, and each save sees
-//! the file as it is on disk. SQLite's default rollback journal is deleted
-//! when a transaction ends, so none is left beside a file (SPEC 15.6).
+//! the file as it is on disk. Plan files use SQLite's rollback journal, which
+//! is deleted when a transaction ends, so none is left beside a file between
+//! requests (SPEC 15.6). A file that comes with journal files beside it, or in
+//! WAL mode, is put right when the server starts ([`prepare`]).
 
 mod names;
 mod records;
@@ -76,6 +78,34 @@ fn read_plan_file(path: &Path) -> Result<Plan, Failure> {
 /// (SPEC 15.8).
 fn upgrade(path: &Path) -> Result<(), Failure> {
     Ok(migrations().to_latest(&mut connect(path)?)?)
+}
+
+/// Readies a file the server has read and will serve: upgrades it
+/// (SPEC 15.8), then leaves it a complete database on its own, with no
+/// journal files beside it (SPEC 15.6).
+///
+/// Leaving WAL mode moves what the WAL holds into the file and deletes the
+/// WAL and its index. Any journal file still there is one SQLite ignores: a
+/// rollback journal that holds no transaction, as `journal_mode = PERSIST`
+/// or `TRUNCATE` leave behind, an empty WAL, or a WAL index without a WAL.
+/// SQLite rolled back any journal that did hold one when the file was read,
+/// so what's left holds nothing the file needs, and is deleted.
+fn prepare(path: &Path) -> Result<(), Failure> {
+    upgrade(path)?;
+    let mode: String = connect(path)?.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err(format!("it can't leave journal mode {mode}").into());
+    }
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut journal = path.as_os_str().to_owned();
+        journal.push(suffix);
+        if let Err(e) = fs::remove_file(&journal)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            return Err(e.into());
+        }
+    }
+    Ok(())
 }
 
 /// Writes the changes from `old` to `new` in one SQLite transaction, so the
@@ -153,9 +183,9 @@ impl PlanFiles {
                 skip(&path, format_args!("another file also holds plan {}", plan.info.id));
                 continue;
             }
-            // Upgrading is the first change to the file, made once it's
-            // known to be served (SPEC 15.8).
-            match upgrade(&path) {
+            // The first change to the file, made once it's known to be
+            // served (SPEC 15.7, 15.8).
+            match prepare(&path) {
                 Ok(()) => {
                     paths.insert(plan.info.id.clone(), path);
                     plans.push(plan);
