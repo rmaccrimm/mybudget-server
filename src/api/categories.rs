@@ -15,16 +15,23 @@ use crate::model::{ById, Category, Group, Plan, new_id};
 
 /// A body's `group_id` must be one of the plan's own groups (SPEC 7.5, 7.6).
 fn own_group<'a>(plan: &'a Plan, id: &str) -> Result<&'a Group, ApiError> {
-    plan.groups
-        .get(id)
-        .filter(|g| !g.internal)
-        .ok_or_else(|| ApiError::bad_request("group_id must be one of the plan's own category groups"))
+    plan.groups.get(id).filter(|g| !g.internal).ok_or_else(|| {
+        ApiError::bad_request("group_id must be one of the plan's own category groups")
+    })
 }
 
-pub async fn list(State(state): State<AppState>, Path(plan_id): Path<String>) -> Result<impl IntoResponse, ApiError> {
+pub async fn list(
+    State(state): State<AppState>,
+    Path(plan_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     let plan = store.plan(&plan_id)?;
-    Ok(Json(plan.groups.values().map(|g| plan.group_view(g)).collect::<Vec<_>>()))
+    Ok(Json(
+        plan.groups
+            .values()
+            .map(|g| plan.group_view(g))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 // --- groups ----------------------------------------------------------------
@@ -38,7 +45,12 @@ pub async fn create_group(
     store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let name = body.required("name", fields::name)?;
-    let group = Group { id: new_id(), name, hidden: false, internal: false };
+    let group = Group {
+        id: new_id(),
+        name,
+        hidden: false,
+        internal: false,
+    };
     let view = store.change_plan(&plan_id, |plan| {
         plan.groups.insert(group.id.clone(), group.clone());
         plan.group_view(&group)
@@ -67,7 +79,9 @@ pub async fn update_group(
     let name = body.optional("name", fields::name)?;
     let hidden = body.optional("hidden", fields::boolean)?;
     if group.internal && (name.is_some() || hidden.is_some()) {
-        return Err(ApiError::bad_request("the Credit Card Payments group can't be changed"));
+        return Err(ApiError::bad_request(
+            "the Credit Card Payments group can't be changed",
+        ));
     }
     if let Some(name) = name {
         group.name = name;
@@ -89,7 +103,9 @@ pub async fn delete_group(
     let mut store = state.store();
     let plan = store.plan(&plan_id)?;
     if plan.groups.by_id(&group_id)?.internal {
-        return Err(ApiError::bad_request("the Credit Card Payments group can't be deleted"));
+        return Err(ApiError::bad_request(
+            "the Credit Card Payments group can't be deleted",
+        ));
     }
     if plan.group_categories(&group_id).next().is_some() {
         return Err(ApiError::conflict("the group has categories"));
@@ -111,9 +127,18 @@ pub async fn create(
     let group = own_group(plan, &body.required("group_id", fields::string)?)?;
     let name = body.required("name", fields::name)?;
     let note = body.optional("note", fields::note)?.flatten();
-    let category =
-        Category { id: new_id(), group_id: group.id.clone(), name, hidden: false, note, payment_account_id: None };
-    store.change_plan(&plan_id, |plan| plan.categories.insert(category.id.clone(), category.clone()))?;
+    let category = Category {
+        id: new_id(),
+        group_id: group.id.clone(),
+        name,
+        hidden: false,
+        note,
+        payment_account_id: None,
+    };
+    store.change_plan(&plan_id, |plan| {
+        plan.categories
+            .insert(category.id.clone(), category.clone())
+    })?;
     Ok((StatusCode::CREATED, Json(category)))
 }
 
@@ -122,7 +147,13 @@ pub async fn get(
     Path((plan_id, category_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
-    Ok(Json(store.plan(&plan_id)?.categories.by_id(&category_id)?.clone()))
+    Ok(Json(
+        store
+            .plan(&plan_id)?
+            .categories
+            .by_id(&category_id)?
+            .clone(),
+    ))
 }
 
 pub async fn update(
@@ -139,7 +170,9 @@ pub async fn update(
     let hidden = body.optional("hidden", fields::boolean)?;
     let group_id = body.optional("group_id", fields::string)?;
     if category.payment_account_id.is_some() && (name.is_some() || group_id.is_some()) {
-        return Err(ApiError::bad_request("a payment category's name and group follow its account"));
+        return Err(ApiError::bad_request(
+            "a payment category's name and group follow its account",
+        ));
     }
     // Naming the category's own group doesn't move it.
     let moved = match group_id {
@@ -191,7 +224,12 @@ pub async fn delete(
     let mut store = state.store();
     let plan = store.plan(&plan_id)?;
     // A payment category goes only with its account (SPEC 13.1).
-    if plan.categories.by_id(&category_id)?.payment_account_id.is_some() {
+    if plan
+        .categories
+        .by_id(&category_id)?
+        .payment_account_id
+        .is_some()
+    {
         return Err(ApiError::bad_request("a payment category can't be deleted"));
     }
     // Every value is checked, and the last counts (SPEC 3.5).
@@ -202,6 +240,8 @@ pub async fn delete(
     if reassign_to.is_none() && plan.category_in_use(&category_id) {
         return Err(ApiError::conflict("category is in use"));
     }
-    store.change_plan(&plan_id, |plan| plan.delete_category(&category_id, reassign_to.as_deref()))?;
+    store.change_plan(&plan_id, |plan| {
+        plan.delete_category(&category_id, reassign_to.as_deref())
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }

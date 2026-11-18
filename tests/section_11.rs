@@ -27,17 +27,35 @@ fn setup(starting: i64) -> Fixture {
         ),
         201,
     ));
-    let g = id(&expect(post(&s, &format!("/plans/{p}/category_groups"), r#"{"name": "Everyday"}"#), 201));
+    let g = id(&expect(
+        post(
+            &s,
+            &format!("/plans/{p}/category_groups"),
+            r#"{"name": "Everyday"}"#,
+        ),
+        201,
+    ));
     let cat = |name: &str| {
         id(&expect(
-            post(&s, &format!("/plans/{p}/categories"), &format!(r#"{{"group_id": "{g}", "name": "{name}"}}"#)),
+            post(
+                &s,
+                &format!("/plans/{p}/categories"),
+                &format!(r#"{{"group_id": "{g}", "name": "{name}"}}"#),
+            ),
             201,
         ))
     };
     let groceries = cat("Groceries");
     let rent = cat("Rent");
     let dining = cat("Dining");
-    Fixture { s, p, checking, groceries, rent, dining }
+    Fixture {
+        s,
+        p,
+        checking,
+        groceries,
+        rent,
+        dining,
+    }
 }
 
 impl Fixture {
@@ -54,11 +72,21 @@ impl Fixture {
 
     fn spend(&self, date: &str, cat: &str, amount: i64) -> Value {
         let body = json!({"account_id": self.checking, "date": date, "amount": amount, "category_id": cat});
-        expect(post(&self.s, &format!("/plans/{}/transactions", self.p), &body.to_string()), 201)
+        expect(
+            post(
+                &self.s,
+                &format!("/plans/{}/transactions", self.p),
+                &body.to_string(),
+            ),
+            201,
+        )
     }
 
     fn month(&self, month: &str) -> Value {
-        expect(get(&self.s, &format!("/plans/{}/months/{month}", self.p)), 200)
+        expect(
+            get(&self.s, &format!("/plans/{}/months/{month}", self.p)),
+            200,
+        )
     }
 }
 
@@ -101,7 +129,13 @@ fn example_11_8() {
     assert_eq!(dec["left_over_from_last_month"], 120000);
     assert_eq!(dec["ready_to_assign"], 120000);
     assert_eq!(dec["cash_overspending_last_month"], 0);
-    let g = expect(get(&f.s, &format!("/plans/{}/months/2027-03/categories/{}", f.p, f.rent)), 200);
+    let g = expect(
+        get(
+            &f.s,
+            &format!("/plans/{}/months/2027-03/categories/{}", f.p, f.rent),
+        ),
+        200,
+    );
     assert_eq!(g, entry(&f.rent, 0, 0, 2400000, 0));
     // Before any data.
     let early = f.month("1900-01");
@@ -138,12 +172,18 @@ fn income_only_counts_cash_lines_and_splits() {
     let body = json!({"account_id": f.checking, "date": "2026-10-06", "amount": 100000,
         "subtransactions": [{"amount": 150000, "category_id": "ready_to_assign"},
                             {"amount": -50000, "category_id": f.groceries}]});
-    expect(post(&f.s, &format!("/plans/{p}/transactions"), &body.to_string()), 201);
+    expect(
+        post(&f.s, &format!("/plans/{p}/transactions"), &body.to_string()),
+        201,
+    );
     let oct = f.month("2026-10");
     assert_eq!(oct["income"], 150000);
     assert_eq!(oct["activity"], -50000);
     assert_eq!(oct["ready_to_assign"], 150000);
-    assert_eq!(oct["categories"][0], entry(&f.groceries, 0, -50000, -50000, 50000));
+    assert_eq!(
+        oct["categories"][0],
+        entry(&f.groceries, 0, -50000, -50000, 50000)
+    );
     let nov = f.month("2026-11");
     assert_eq!(nov["cash_overspending_last_month"], 50000);
     assert_eq!(nov["ready_to_assign"], 100000);
@@ -154,22 +194,55 @@ fn scoping_hidden_and_payment_categories() {
     let f = setup(500000);
     let p = &f.p;
     let other = new_plan(&f.s);
-    err(&get(&f.s, &format!("/plans/{other}/months/2026-10/categories/{}", f.groceries)), 404);
-    err(&patch(&f.s, &format!("/plans/{other}/months/2026-10/categories/{}", f.groceries), r#"{"assigned": 1}"#), 404);
+    err(
+        &get(
+            &f.s,
+            &format!("/plans/{other}/months/2026-10/categories/{}", f.groceries),
+        ),
+        404,
+    );
+    err(
+        &patch(
+            &f.s,
+            &format!("/plans/{other}/months/2026-10/categories/{}", f.groceries),
+            r#"{"assigned": 1}"#,
+        ),
+        404,
+    );
 
-    expect(patch(&f.s, &format!("/plans/{p}/categories/{}", f.rent), r#"{"hidden": true}"#), 200);
+    expect(
+        patch(
+            &f.s,
+            &format!("/plans/{p}/categories/{}", f.rent),
+            r#"{"hidden": true}"#,
+        ),
+        200,
+    );
     f.assign("2026-10", &f.rent, 100000);
     let oct = f.month("2026-10");
     assert_eq!(oct["categories"].as_array().unwrap().len(), 3);
     assert_eq!(oct["ready_to_assign"], 400000);
 
-    let visa = expect(post(&f.s, &format!("/plans/{p}/accounts"), r#"{"name": "Visa", "type": "creditCard"}"#), 201);
+    let visa = expect(
+        post(
+            &f.s,
+            &format!("/plans/{p}/accounts"),
+            r#"{"name": "Visa", "type": "creditCard"}"#,
+        ),
+        201,
+    );
     let pay = visa["payment_category_id"].as_str().unwrap().to_string();
-    assert_eq!(f.assign("2026-10", &pay, 70000), entry(&pay, 70000, 0, 70000, 0));
+    assert_eq!(
+        f.assign("2026-10", &pay, 70000),
+        entry(&pay, 70000, 0, 70000, 0)
+    );
     let oct = f.month("2026-10");
     assert_eq!(oct["categories"][0]["category_id"], pay.as_str());
     assert_eq!(oct["assigned"], 170000);
-    assert_eq!(delete(&f.s, &format!("/plans/{p}/accounts/{}", id(&visa))).status, 204);
+    assert_eq!(
+        delete(&f.s, &format!("/plans/{p}/accounts/{}", id(&visa))).status,
+        204
+    );
     let oct = f.month("2026-10");
     assert_eq!(oct["assigned"], 100000);
     assert_eq!(oct["ready_to_assign"], 400000);
@@ -183,18 +256,65 @@ fn errors() {
     err(&get(&f.s, &format!("/plans/{p}/months/2026-13")), 400);
     err(&get(&f.s, &format!("/plans/{p}/months/1899-12")), 400);
     err(&get(&f.s, "/plans/nope/months/2026-10"), 404);
-    err(&get(&f.s, &format!("/plans/{p}/months/2026-10/categories/ready_to_assign")), 404);
-    err(&patch(&f.s, &format!("/plans/{p}/months/2026-10/categories/ready_to_assign"), r#"{"assigned": 1}"#), 404);
-    err(&get(&f.s, &format!("/plans/{p}/months/bad/categories/nope")), 404);
-    err(&get(&f.s, &format!("/plans/{p}/months/bad/categories/{g}")), 400);
-    err(&req(&f.s, "POST", &format!("/plans/{p}/months/2026-10"), Some(b"{}")), 405);
-    err(&req(&f.s, "DELETE", &format!("/plans/{p}/months/2026-10/categories/{g}"), None), 405);
+    err(
+        &get(
+            &f.s,
+            &format!("/plans/{p}/months/2026-10/categories/ready_to_assign"),
+        ),
+        404,
+    );
+    err(
+        &patch(
+            &f.s,
+            &format!("/plans/{p}/months/2026-10/categories/ready_to_assign"),
+            r#"{"assigned": 1}"#,
+        ),
+        404,
+    );
+    err(
+        &get(&f.s, &format!("/plans/{p}/months/bad/categories/nope")),
+        404,
+    );
+    err(
+        &get(&f.s, &format!("/plans/{p}/months/bad/categories/{g}")),
+        400,
+    );
+    err(
+        &req(
+            &f.s,
+            "POST",
+            &format!("/plans/{p}/months/2026-10"),
+            Some(b"{}"),
+        ),
+        405,
+    );
+    err(
+        &req(
+            &f.s,
+            "DELETE",
+            &format!("/plans/{p}/months/2026-10/categories/{g}"),
+            None,
+        ),
+        405,
+    );
     let path = format!("/plans/{p}/months/2026-10/categories/{g}");
-    for body in [r#"{"assigned": null}"#, r#"{"assigned": 1.5}"#, r#"{"assigned": "1"}"#, "", "[]"] {
+    for body in [
+        r#"{"assigned": null}"#,
+        r#"{"assigned": 1.5}"#,
+        r#"{"assigned": "1"}"#,
+        "",
+        "[]",
+    ] {
         err(&patch(&f.s, &path, body), 400);
     }
-    assert_eq!(expect(patch(&f.s, &path, r#"{"other": 1}"#), 200), entry(g, 0, 0, 0, 0));
-    assert_eq!(f.assign("2026-10", g, -5000), entry(g, -5000, 0, -5000, 5000));
+    assert_eq!(
+        expect(patch(&f.s, &path, r#"{"other": 1}"#), 200),
+        entry(g, 0, 0, 0, 0)
+    );
+    assert_eq!(
+        f.assign("2026-10", g, -5000),
+        entry(g, -5000, 0, -5000, 5000)
+    );
     assert_eq!(f.assign("2026-10", g, -0), entry(g, 0, 0, 0, 0));
     let head = req(&f.s, "HEAD", &path, None);
     assert_eq!(head.status, 200);

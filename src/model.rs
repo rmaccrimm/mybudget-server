@@ -165,7 +165,11 @@ impl Cleared {
     /// A new transaction's default: money in a wallet clears at once
     /// (SPEC 8.1).
     pub fn default_for(kind: AccountType) -> Self {
-        if kind == AccountType::Cash { Self::Cleared } else { Self::Uncleared }
+        if kind == AccountType::Cash {
+            Self::Cleared
+        } else {
+            Self::Uncleared
+        }
     }
 }
 
@@ -212,7 +216,10 @@ impl Transaction {
     /// category (SPEC 8.5, 13.2).
     pub fn has_category(&self, category_id: &str) -> bool {
         self.category_id.as_deref() == Some(category_id)
-            || self.subtransactions.iter().any(|s| s.category_id == category_id)
+            || self
+                .subtransactions
+                .iter()
+                .any(|s| s.category_id == category_id)
     }
 
     /// Moves the transaction and its subtransactions from category `from`
@@ -221,7 +228,11 @@ impl Transaction {
         if self.category_id.as_deref() == Some(from) {
             self.category_id = Some(to.to_owned());
         }
-        for s in self.subtransactions.iter_mut().filter(|s| s.category_id == from) {
+        for s in self
+            .subtransactions
+            .iter_mut()
+            .filter(|s| s.category_id == from)
+        {
             s.category_id = to.to_owned();
         }
     }
@@ -264,9 +275,18 @@ pub struct Plan {
 impl Plan {
     pub fn new(name: String, currency_code: String, created_at: i64) -> Self {
         let id = new_id();
-        let internal = Group { id: new_id(), name: CREDIT_CARD_PAYMENTS.into(), hidden: false, internal: true };
+        let internal = Group {
+            id: new_id(),
+            name: CREDIT_CARD_PAYMENTS.into(),
+            hidden: false,
+            internal: true,
+        };
         Self {
-            info: PlanInfo { id, name, currency_code },
+            info: PlanInfo {
+                id,
+                name,
+                currency_code,
+            },
             created_at,
             accounts: Table::new(),
             payees: Table::new(),
@@ -282,7 +302,11 @@ impl Plan {
     /// An account's balances (SPEC 5.4).
     pub fn balances(&self, account_id: &str) -> Balances {
         let mut b = Balances::default();
-        for t in self.transactions.values().filter(|t| t.account_id == account_id) {
+        for t in self
+            .transactions
+            .values()
+            .filter(|t| t.account_id == account_id)
+        {
             b.balance += t.amount;
             match t.cleared {
                 Cleared::Cleared | Cleared::Reconciled => b.cleared_balance += t.amount,
@@ -293,7 +317,10 @@ impl Plan {
     }
 
     pub fn account_view(&self, account_id: &str) -> AccountView {
-        let account = self.accounts.get(account_id).expect("the caller found the account");
+        let account = self
+            .accounts
+            .get(account_id)
+            .expect("the caller found the account");
         AccountView {
             account: account.clone(),
             on_budget: account.kind.on_budget(),
@@ -323,7 +350,10 @@ impl Plan {
             },
         );
         let payment_category_id = kind.is_credit().then(|| {
-            let (group_id, group) = self.groups.first().expect("every plan has the internal group");
+            let (group_id, group) = self
+                .groups
+                .first()
+                .expect("every plan has the internal group");
             debug_assert!(group.internal);
             let category = Category {
                 id: new_id(),
@@ -339,7 +369,15 @@ impl Plan {
         });
         self.accounts.insert(
             account_id.clone(),
-            Account { id: account_id.clone(), name, kind, closed: false, note, transfer_payee_id, payment_category_id },
+            Account {
+                id: account_id.clone(),
+                name,
+                kind,
+                closed: false,
+                note,
+                transfer_payee_id,
+                payment_category_id,
+            },
         );
         if let Some((amount, date)) = starting.filter(|(amount, _)| *amount != 0) {
             let transaction = Transaction {
@@ -353,7 +391,8 @@ impl Plan {
                 approved: true,
                 ..Default::default()
             };
-            self.transactions.insert(transaction.id.clone(), transaction);
+            self.transactions
+                .insert(transaction.id.clone(), transaction);
         }
         account_id
     }
@@ -361,24 +400,38 @@ impl Plan {
     /// Renames an account, its transfer payee and its payment category
     /// (SPEC 5.7).
     pub fn rename_account(&mut self, account_id: &str, name: String) {
-        let account = self.accounts.get_mut(account_id).expect("the caller found the account");
-        let payee = self.payees.get_mut(&account.transfer_payee_id).expect("an account's transfer payee exists");
+        let account = self
+            .accounts
+            .get_mut(account_id)
+            .expect("the caller found the account");
+        let payee = self
+            .payees
+            .get_mut(&account.transfer_payee_id)
+            .expect("an account's transfer payee exists");
         payee.name = transfer_payee_name(&name);
         if let Some(category_id) = &account.payment_category_id {
-            let category = self.categories.get_mut(category_id).expect("an account's payment category exists");
+            let category = self
+                .categories
+                .get_mut(category_id)
+                .expect("an account's payment category exists");
             category.name = name.clone();
         }
         account.name = name;
     }
 
     pub fn account_has_transactions(&self, account_id: &str) -> bool {
-        self.transactions.values().any(|t| t.account_id == account_id)
+        self.transactions
+            .values()
+            .any(|t| t.account_id == account_id)
     }
 
     /// Deletes an account, its transfer payee and its payment category
     /// (SPEC 5.9). The caller checks it has no transactions.
     pub fn delete_account(&mut self, account_id: &str) {
-        let account = self.accounts.shift_remove(account_id).expect("the caller found the account");
+        let account = self
+            .accounts
+            .shift_remove(account_id)
+            .expect("the caller found the account");
         self.payees.shift_remove(&account.transfer_payee_id);
         if let Some(category_id) = account.payment_category_id {
             self.assigned.remove(&category_id);
@@ -390,7 +443,9 @@ impl Plan {
 
     /// The payee, not a transfer payee, named exactly `name`.
     pub fn find_payee_by_name(&self, name: &str) -> Option<&Payee> {
-        self.payees.values().find(|p| !p.is_transfer() && p.name == name)
+        self.payees
+            .values()
+            .find(|p| !p.is_transfer() && p.name == name)
     }
 
     /// Finds the payee, not a transfer payee, named exactly `name`, creating
@@ -400,27 +455,43 @@ impl Plan {
             return p.id.clone();
         }
         let id = new_id();
-        self.payees.insert(id.clone(), Payee { id: id.clone(), name: name.to_owned(), transfer_account_id: None });
+        self.payees.insert(
+            id.clone(),
+            Payee {
+                id: id.clone(),
+                name: name.to_owned(),
+                transfer_account_id: None,
+            },
+        );
         id
     }
 
     pub fn payee_in_use(&self, payee_id: &str) -> bool {
-        self.transactions.values().any(|t| t.payee_id.as_deref() == Some(payee_id))
+        self.transactions
+            .values()
+            .any(|t| t.payee_id.as_deref() == Some(payee_id))
     }
 
     // --- categories -------------------------------------------------------
 
     /// A group's categories, in the order they joined it.
     pub fn group_categories<'a>(&'a self, group_id: &'a str) -> impl Iterator<Item = &'a Category> {
-        self.categories.values().filter(move |c| c.group_id == group_id)
+        self.categories
+            .values()
+            .filter(move |c| c.group_id == group_id)
     }
 
     pub fn group_view(&self, group: &Group) -> GroupView {
-        GroupView { group: group.clone(), categories: self.group_categories(&group.id).cloned().collect() }
+        GroupView {
+            group: group.clone(),
+            categories: self.group_categories(&group.id).cloned().collect(),
+        }
     }
 
     pub fn category_in_use(&self, category_id: &str) -> bool {
-        self.transactions.values().any(|t| t.has_category(category_id))
+        self.transactions
+            .values()
+            .any(|t| t.has_category(category_id))
     }
 
     /// Deletes a user category (SPEC 13.3). With `reassign_to`, its
@@ -429,7 +500,9 @@ impl Plan {
     /// Without it, its assigned amounts are dropped; the caller checks it
     /// isn't in use.
     pub fn delete_category(&mut self, category_id: &str, reassign_to: Option<&str>) {
-        self.categories.shift_remove(category_id).expect("the caller found the category");
+        self.categories
+            .shift_remove(category_id)
+            .expect("the caller found the category");
         let assigned = self.assigned.remove(category_id).unwrap_or_default();
         let Some(to) = reassign_to else {
             debug_assert!(!self.category_in_use(category_id));

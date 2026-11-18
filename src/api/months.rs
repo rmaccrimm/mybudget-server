@@ -16,7 +16,8 @@ use crate::model::ById;
 
 /// A month in a path; anything else is 400 (SPEC 3.8).
 fn month(s: &str) -> Result<Month, ApiError> {
-    s.parse().map_err(|_| ApiError::bad_request("the month must be YYYY-MM from 1900-01 to 2999-12"))
+    s.parse()
+        .map_err(|_| ApiError::bad_request("the month must be YYYY-MM from 1900-01 to 2999-12"))
 }
 
 pub async fn get(
@@ -52,7 +53,10 @@ pub async fn update_category(
     let assigned = body.optional("assigned", fields::amount)?;
     let entry = store.change_plan(&plan_id, |plan| {
         if let Some(assigned) = assigned {
-            plan.assigned.entry(category_id.clone()).or_default().insert(m, assigned);
+            plan.assigned
+                .entry(category_id.clone())
+                .or_default()
+                .insert(m, assigned);
         }
         Budget::new(plan).entry(&category_id, m)
     })?;

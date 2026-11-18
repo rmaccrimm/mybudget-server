@@ -48,7 +48,9 @@ impl AppState {
     fn store(&self) -> MutexGuard<'_, Store> {
         // A handler that panicked may have left a change half-applied, so
         // the data can't be trusted after that.
-        self.0.lock().expect("no handler panicked while holding the store")
+        self.0
+            .lock()
+            .expect("no handler panicked while holding the store")
     }
 
     /// Exits the process with status 0 once no request holds the store, so
@@ -65,25 +67,59 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/plans", get(plans::list).post(plans::create))
-        .route("/plans/{plan}", get(plans::get).patch(plans::update).delete(plans::delete))
-        .route("/plans/{plan}/accounts", get(accounts::list).post(accounts::create))
-        .route("/plans/{plan}/accounts/{account}", get(accounts::get).patch(accounts::update).delete(accounts::delete))
-        .route("/plans/{plan}/payees", get(payees::list).post(payees::create))
-        .route("/plans/{plan}/payees/{payee}", get(payees::get).patch(payees::update).delete(payees::delete))
-        .route("/plans/{plan}/categories", get(categories::list).post(categories::create))
+        .route(
+            "/plans/{plan}",
+            get(plans::get).patch(plans::update).delete(plans::delete),
+        )
+        .route(
+            "/plans/{plan}/accounts",
+            get(accounts::list).post(accounts::create),
+        )
+        .route(
+            "/plans/{plan}/accounts/{account}",
+            get(accounts::get)
+                .patch(accounts::update)
+                .delete(accounts::delete),
+        )
+        .route(
+            "/plans/{plan}/payees",
+            get(payees::list).post(payees::create),
+        )
+        .route(
+            "/plans/{plan}/payees/{payee}",
+            get(payees::get)
+                .patch(payees::update)
+                .delete(payees::delete),
+        )
+        .route(
+            "/plans/{plan}/categories",
+            get(categories::list).post(categories::create),
+        )
         .route(
             "/plans/{plan}/categories/{category}",
-            get(categories::get).patch(categories::update).delete(categories::delete),
+            get(categories::get)
+                .patch(categories::update)
+                .delete(categories::delete),
         )
-        .route("/plans/{plan}/category_groups", post(categories::create_group))
+        .route(
+            "/plans/{plan}/category_groups",
+            post(categories::create_group),
+        )
         .route(
             "/plans/{plan}/category_groups/{group}",
-            get(categories::get_group).patch(categories::update_group).delete(categories::delete_group),
+            get(categories::get_group)
+                .patch(categories::update_group)
+                .delete(categories::delete_group),
         )
-        .route("/plans/{plan}/transactions", get(transactions::list).post(transactions::create))
+        .route(
+            "/plans/{plan}/transactions",
+            get(transactions::list).post(transactions::create),
+        )
         .route(
             "/plans/{plan}/transactions/{transaction}",
-            get(transactions::get).patch(transactions::update).delete(transactions::delete),
+            get(transactions::get)
+                .patch(transactions::update)
+                .delete(transactions::delete),
         )
         .route("/plans/{plan}/months/{month}", get(months::get))
         .route(

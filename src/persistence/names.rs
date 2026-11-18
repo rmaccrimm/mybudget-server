@@ -5,12 +5,24 @@ const MAX_SAFE_NAME: usize = 200;
 
 /// A plan's name made safe for a file name (SPEC 15.3).
 pub fn safe_name(name: &str) -> String {
-    let replaced: String =
-        name.chars().map(|c| if c.is_ascii_control() || r#"/\:*?"<>|"#.contains(c) { '_' } else { c }).collect();
+    let replaced: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_control() || r#"/\:*?"<>|"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
     let cut = &replaced[..replaced.floor_char_boundary(MAX_SAFE_NAME)];
     // char::is_whitespace is Unicode's White_Space property.
     let trimmed = cut.trim_matches(|c: char| c.is_whitespace() || c == '.');
-    if trimmed.is_empty() { "Plan".to_owned() } else { trimmed.to_owned() }
+    if trimmed.is_empty() {
+        "Plan".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// The names a plan's file may have, best first: its safe name, then with the
@@ -20,7 +32,11 @@ pub fn safe_name(name: &str) -> String {
 pub fn file_names(plan_name: &str, plan_id: &str) -> [String; 3] {
     let safe = safe_name(plan_name);
     let short_id: String = plan_id.chars().take(8).collect();
-    [format!("{safe}.sqlite"), format!("{safe} ({short_id}).sqlite"), format!("{safe} ({plan_id}).sqlite")]
+    [
+        format!("{safe}.sqlite"),
+        format!("{safe} ({short_id}).sqlite"),
+        format!("{safe} ({plan_id}).sqlite"),
+    ]
 }
 
 #[cfg(test)]
@@ -34,7 +50,10 @@ mod tests {
         assert_eq!(safe_name(" .hidden. "), "hidden");
         assert_eq!(safe_name("..."), "Plan");
         assert_eq!(safe_name(" \u{3000}. "), "Plan");
-        assert_eq!(safe_name("a\tb\u{7f}c\\d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j");
+        assert_eq!(
+            safe_name("a\tb\u{7f}c\\d*e?f\"g<h>i|j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
         // C1 controls aren't replaced.
         assert_eq!(safe_name("a\u{85}b"), "a\u{85}b");
         // A control character at an end is replaced before trimming, so it stays.

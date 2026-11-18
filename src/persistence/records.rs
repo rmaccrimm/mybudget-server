@@ -13,8 +13,8 @@ use serde::de::IntoDeserializer;
 use super::Failure;
 use crate::calendar::{self, Month};
 use crate::model::{
-    Account, AccountType, Assigned, Category, Cleared, FlagColor, Group, Payee, Plan, PlanInfo, READY_TO_ASSIGN,
-    Subtransaction, Table, Transaction,
+    Account, AccountType, Assigned, Category, Cleared, FlagColor, Group, Payee, Plan, PlanInfo,
+    READY_TO_ASSIGN, Subtransaction, Table, Transaction,
 };
 
 /// Stores serde enums by their wire names, such as `creditCard`, so a plan
@@ -49,7 +49,10 @@ impl ToSql for Month {
 
 impl FromSql for Month {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        value.as_str()?.parse().map_err(|_| FromSqlError::Other("not a month YYYY-MM".into()))
+        value
+            .as_str()?
+            .parse()
+            .map_err(|_| FromSqlError::Other("not a month YYYY-MM".into()))
     }
 }
 
@@ -117,11 +120,18 @@ impl Record for Payee {
     }
 
     fn columns(&self) -> Vec<(&'static str, &dyn ToSql)> {
-        vec![("name", &self.name), ("transfer_account_id", &self.transfer_account_id)]
+        vec![
+            ("name", &self.name),
+            ("transfer_account_id", &self.transfer_account_id),
+        ]
     }
 
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
-        Ok(Self { id: row.get("id")?, name: row.get("name")?, transfer_account_id: row.get("transfer_account_id")? })
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            transfer_account_id: row.get("transfer_account_id")?,
+        })
     }
 }
 
@@ -133,7 +143,11 @@ impl Record for Group {
     }
 
     fn columns(&self) -> Vec<(&'static str, &dyn ToSql)> {
-        vec![("name", &self.name), ("hidden", &self.hidden), ("internal", &self.internal)]
+        vec![
+            ("name", &self.name),
+            ("hidden", &self.hidden),
+            ("internal", &self.internal),
+        ]
     }
 
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
@@ -231,7 +245,8 @@ impl Record for Transaction {
     }
 
     fn delete_parts(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-        conn.prepare_cached("DELETE FROM subtransactions WHERE transaction_id = ?1")?.execute([id])?;
+        conn.prepare_cached("DELETE FROM subtransactions WHERE transaction_id = ?1")?
+            .execute([id])?;
         Ok(())
     }
 }
@@ -247,9 +262,14 @@ impl Record for Transaction {
 /// follow, every row is written at the end, in order. That's where a `Table`
 /// puts new objects, and categories that move to another group (SPEC 7.6), so
 /// usually only those rows get a new `position`.
-fn write_table<R: Record>(conn: &Connection, old: &Table<R>, new: &Table<R>) -> rusqlite::Result<()> {
+fn write_table<R: Record>(
+    conn: &Connection,
+    old: &Table<R>,
+    new: &Table<R>,
+) -> rusqlite::Result<()> {
     for id in old.keys().filter(|id| !new.contains_key(*id)) {
-        conn.prepare_cached(&format!("DELETE FROM {} WHERE id = ?1", R::TABLE))?.execute([id])?;
+        conn.prepare_cached(&format!("DELETE FROM {} WHERE id = ?1", R::TABLE))?
+            .execute([id])?;
         R::delete_parts(conn, id)?;
     }
     let mut last_kept = None;
@@ -265,11 +285,11 @@ fn write_table<R: Record>(conn: &Connection, old: &Table<R>, new: &Table<R>) -> 
             _ => {
                 let position = match next_position {
                     Some(position) => position,
-                    None => {
-                        conn.query_row(&format!("SELECT IFNULL(MAX(position), 0) + 1 FROM {}", R::TABLE), [], |r| {
-                            r.get(0)
-                        })?
-                    }
+                    None => conn.query_row(
+                        &format!("SELECT IFNULL(MAX(position), 0) + 1 FROM {}", R::TABLE),
+                        [],
+                        |r| r.get(0),
+                    )?,
                 };
                 put_at(conn, row, position)?;
                 next_position = Some(position + 1);
@@ -282,11 +302,16 @@ fn write_table<R: Record>(conn: &Connection, old: &Table<R>, new: &Table<R>) -> 
 /// Writes a row's columns in place, keeping its position.
 fn update<R: Record>(conn: &Connection, row: &R) -> rusqlite::Result<()> {
     let columns = row.columns();
-    let set: Vec<String> = columns.iter().enumerate().map(|(i, (name, _))| format!("{name} = ?{}", i + 2)).collect();
+    let set: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| format!("{name} = ?{}", i + 2))
+        .collect();
     let sql = format!("UPDATE {} SET {} WHERE id = ?1", R::TABLE, set.join(", "));
     let id = row.id();
     let values = std::iter::once(&id as &dyn ToSql).chain(columns.iter().map(|(_, v)| *v));
-    conn.prepare_cached(&sql)?.execute(rusqlite::params_from_iter(values))?;
+    conn.prepare_cached(&sql)?
+        .execute(rusqlite::params_from_iter(values))?;
     row.write_parts(conn)
 }
 
@@ -295,7 +320,10 @@ fn put_at<R: Record>(conn: &Connection, row: &R, position: i64) -> rusqlite::Res
     let columns = row.columns();
     let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
     let placeholders: Vec<String> = (3..names.len() + 3).map(|i| format!("?{i}")).collect();
-    let updates: Vec<String> = names.iter().map(|name| format!("{name} = excluded.{name}")).collect();
+    let updates: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name} = excluded.{name}"))
+        .collect();
     let sql = format!(
         "INSERT INTO {} (id, position, {}) VALUES (?1, ?2, {}) \
          ON CONFLICT (id) DO UPDATE SET position = excluded.position, {}",
@@ -305,13 +333,18 @@ fn put_at<R: Record>(conn: &Connection, row: &R, position: i64) -> rusqlite::Res
         updates.join(", "),
     );
     let id = row.id();
-    let values = [&id as &dyn ToSql, &position].into_iter().chain(columns.iter().map(|(_, v)| *v));
-    conn.prepare_cached(&sql)?.execute(rusqlite::params_from_iter(values))?;
+    let values = [&id as &dyn ToSql, &position]
+        .into_iter()
+        .chain(columns.iter().map(|(_, v)| *v));
+    conn.prepare_cached(&sql)?
+        .execute(rusqlite::params_from_iter(values))?;
     row.write_parts(conn)
 }
 
 fn write_assigned(conn: &Connection, old: &Assigned, new: &Assigned) -> rusqlite::Result<()> {
-    let amount = |assigned: &Assigned, category: &str, month: &Month| assigned.get(category)?.get(month).copied();
+    let amount = |assigned: &Assigned, category: &str, month: &Month| {
+        assigned.get(category)?.get(month).copied()
+    };
     for (category, months) in old {
         for month in months.keys().filter(|m| amount(new, category, m).is_none()) {
             conn.prepare_cached("DELETE FROM assignments WHERE category_id = ?1 AND month = ?2")?
@@ -319,7 +352,10 @@ fn write_assigned(conn: &Connection, old: &Assigned, new: &Assigned) -> rusqlite
         }
     }
     for (category, months) in new {
-        for (month, &assigned) in months.iter().filter(|&(m, &a)| amount(old, category, m) != Some(a)) {
+        for (month, &assigned) in months
+            .iter()
+            .filter(|&(m, &a)| amount(old, category, m) != Some(a))
+        {
             conn.prepare_cached(
                 "INSERT INTO assignments (category_id, month, assigned) VALUES (?1, ?2, ?3) \
                  ON CONFLICT (category_id, month) DO UPDATE SET assigned = excluded.assigned",
@@ -342,16 +378,35 @@ pub fn write_plan(conn: &Connection, old: Option<&Plan>, new: &Plan) -> rusqlite
             )?;
         }
         Some(old) if old.info != new.info => {
-            conn.execute("UPDATE plan SET name = ?1, currency_code = ?2", params![info.name, info.currency_code])?;
+            conn.execute(
+                "UPDATE plan SET name = ?1, currency_code = ?2",
+                params![info.name, info.currency_code],
+            )?;
         }
         Some(_) => {}
     }
-    write_table(conn, old.map_or(&Table::new(), |p| &p.accounts), &new.accounts)?;
+    write_table(
+        conn,
+        old.map_or(&Table::new(), |p| &p.accounts),
+        &new.accounts,
+    )?;
     write_table(conn, old.map_or(&Table::new(), |p| &p.payees), &new.payees)?;
     write_table(conn, old.map_or(&Table::new(), |p| &p.groups), &new.groups)?;
-    write_table(conn, old.map_or(&Table::new(), |p| &p.categories), &new.categories)?;
-    write_table(conn, old.map_or(&Table::new(), |p| &p.transactions), &new.transactions)?;
-    write_assigned(conn, old.map_or(&Assigned::new(), |p| &p.assigned), &new.assigned)
+    write_table(
+        conn,
+        old.map_or(&Table::new(), |p| &p.categories),
+        &new.categories,
+    )?;
+    write_table(
+        conn,
+        old.map_or(&Table::new(), |p| &p.transactions),
+        &new.transactions,
+    )?;
+    write_assigned(
+        conn,
+        old.map_or(&Assigned::new(), |p| &p.assigned),
+        &new.assigned,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -368,19 +423,36 @@ fn read_table<R: Record>(conn: &Connection) -> rusqlite::Result<Table<R>> {
 pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
     let mut plan_rows = conn.prepare("SELECT id, name, currency_code, created_at FROM plan")?;
     let plan_rows: Vec<(PlanInfo, i64)> = plan_rows
-        .query_map([], |r| Ok((PlanInfo { id: r.get(0)?, name: r.get(1)?, currency_code: r.get(2)? }, r.get(3)?)))?
+        .query_map([], |r| {
+            Ok((
+                PlanInfo {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    currency_code: r.get(2)?,
+                },
+                r.get(3)?,
+            ))
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    let [(info, created_at)] = <[_; 1]>::try_from(plan_rows).map_err(|_| "the plan table must have one row")?;
+    let [(info, created_at)] =
+        <[_; 1]>::try_from(plan_rows).map_err(|_| "the plan table must have one row")?;
 
     let mut transactions: Table<Transaction> = read_table(conn)?;
-    let mut subtransactions = conn.prepare("SELECT * FROM subtransactions ORDER BY transaction_id, position")?;
+    let mut subtransactions =
+        conn.prepare("SELECT * FROM subtransactions ORDER BY transaction_id, position")?;
     let subtransactions = subtransactions.query_map([], |r| {
-        let s = Subtransaction { amount: r.get("amount")?, category_id: r.get("category_id")?, memo: r.get("memo")? };
+        let s = Subtransaction {
+            amount: r.get("amount")?,
+            category_id: r.get("category_id")?,
+            memo: r.get("memo")?,
+        };
         Ok((r.get::<_, String>("transaction_id")?, s))
     })?;
     for row in subtransactions {
         let (transaction_id, s) = row?;
-        let t = transactions.get_mut(&transaction_id).ok_or("a subtransaction's transaction is missing")?;
+        let t = transactions
+            .get_mut(&transaction_id)
+            .ok_or("a subtransaction's transaction is missing")?;
         t.subtransactions.push(s);
     }
 
@@ -388,7 +460,10 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
     let mut assignments = conn.prepare("SELECT category_id, month, assigned FROM assignments")?;
     for row in assignments.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
         let (category_id, month, amount): (String, Month, i64) = row?;
-        assigned.entry(category_id).or_default().insert(month, amount);
+        assigned
+            .entry(category_id)
+            .or_default()
+            .insert(month, amount);
     }
 
     let plan = Plan {
@@ -411,53 +486,94 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
 fn check_links(plan: &Plan) -> Result<(), String> {
     let ensure = |ok: bool, problem: &str| if ok { Ok(()) } else { Err(problem.to_owned()) };
     let mut groups = plan.groups.values();
-    ensure(groups.next().is_some_and(|g| g.internal), "the first category group must be Credit Card Payments")?;
-    ensure(groups.all(|g| !g.internal), "only one category group may be internal")?;
+    ensure(
+        groups.next().is_some_and(|g| g.internal),
+        "the first category group must be Credit Card Payments",
+    )?;
+    ensure(
+        groups.all(|g| !g.internal),
+        "only one category group may be internal",
+    )?;
     for a in plan.accounts.values() {
         let payee = plan.payees.get(&a.transfer_payee_id);
         ensure(
             payee.is_some_and(|p| p.transfer_account_id.as_ref() == Some(&a.id)),
             "an account's transfer payee is missing",
         )?;
-        let payment = a.payment_category_id.as_ref().map(|id| plan.categories.get(id));
+        let payment = a
+            .payment_category_id
+            .as_ref()
+            .map(|id| plan.categories.get(id));
         ensure(
             match payment {
-                Some(c) => a.kind.is_credit() && c.is_some_and(|c| c.payment_account_id.as_ref() == Some(&a.id)),
+                Some(c) => {
+                    a.kind.is_credit()
+                        && c.is_some_and(|c| c.payment_account_id.as_ref() == Some(&a.id))
+                }
                 None => !a.kind.is_credit(),
             },
             "a credit account's payment category is missing",
         )?;
     }
     for p in plan.payees.values() {
-        let account = p.transfer_account_id.as_ref().map(|id| plan.accounts.get(id));
+        let account = p
+            .transfer_account_id
+            .as_ref()
+            .map(|id| plan.accounts.get(id));
         ensure(
             account.is_none_or(|a| a.is_some_and(|a| a.transfer_payee_id == p.id)),
             "a transfer payee's account is missing",
         )?;
     }
     for c in plan.categories.values() {
-        let group = plan.groups.get(&c.group_id).ok_or("a category's group is missing")?;
+        let group = plan
+            .groups
+            .get(&c.group_id)
+            .ok_or("a category's group is missing")?;
         ensure(
             group.internal == c.payment_account_id.is_some(),
             "Credit Card Payments must hold the payment categories, and only them",
         )?;
-        let account = c.payment_account_id.as_ref().map(|id| plan.accounts.get(id));
+        let account = c
+            .payment_account_id
+            .as_ref()
+            .map(|id| plan.accounts.get(id));
         ensure(
-            account.is_none_or(|a| a.is_some_and(|a| a.payment_category_id.as_ref() == Some(&c.id))),
+            account
+                .is_none_or(|a| a.is_some_and(|a| a.payment_category_id.as_ref() == Some(&c.id))),
             "a payment category's account is missing",
         )?;
     }
     let category_exists = |id: &str| id == READY_TO_ASSIGN || plan.categories.contains_key(id);
     for t in plan.transactions.values() {
-        ensure(plan.accounts.contains_key(&t.account_id), "a transaction's account is missing")?;
-        ensure(calendar::is_date(&t.date), "a transaction's date isn't a date")?;
-        ensure(t.payee_id.as_ref().is_none_or(|id| plan.payees.contains_key(id)), "a transaction's payee is missing")?;
-        ensure(t.category_id.as_deref().is_none_or(category_exists), "a transaction's category is missing")?;
         ensure(
-            t.subtransactions.iter().all(|s| category_exists(&s.category_id)),
+            plan.accounts.contains_key(&t.account_id),
+            "a transaction's account is missing",
+        )?;
+        ensure(
+            calendar::is_date(&t.date),
+            "a transaction's date isn't a date",
+        )?;
+        ensure(
+            t.payee_id
+                .as_ref()
+                .is_none_or(|id| plan.payees.contains_key(id)),
+            "a transaction's payee is missing",
+        )?;
+        ensure(
+            t.category_id.as_deref().is_none_or(category_exists),
+            "a transaction's category is missing",
+        )?;
+        ensure(
+            t.subtransactions
+                .iter()
+                .all(|s| category_exists(&s.category_id)),
             "a subtransaction's category is missing",
         )?;
-        let other = t.transfer_transaction_id.as_ref().map(|id| plan.transactions.get(id));
+        let other = t
+            .transfer_transaction_id
+            .as_ref()
+            .map(|id| plan.transactions.get(id));
         ensure(
             match other {
                 Some(o) => o.is_some_and(|o| {
@@ -481,13 +597,19 @@ mod tests {
 
     fn assert_rows<T: PartialEq + Debug>(read: &Table<T>, written: &Table<T>) {
         // IndexMap's `==` ignores order.
-        assert_eq!(read.iter().collect::<Vec<_>>(), written.iter().collect::<Vec<_>>());
+        assert_eq!(
+            read.iter().collect::<Vec<_>>(),
+            written.iter().collect::<Vec<_>>()
+        );
     }
 
     /// Reads the plan back and checks it's the one written, in every order.
     fn assert_holds(conn: &Connection, written: &Plan) {
         let read = read_plan(conn).unwrap();
-        assert_eq!((&read.info, read.created_at), (&written.info, written.created_at));
+        assert_eq!(
+            (&read.info, read.created_at),
+            (&written.info, written.created_at)
+        );
         assert_rows(&read.accounts, &written.accounts);
         assert_rows(&read.payees, &written.payees);
         assert_rows(&read.groups, &written.groups);
@@ -512,13 +634,27 @@ mod tests {
 
     fn add_group(plan: &mut Plan, name: &str) -> String {
         let id = new_id();
-        plan.groups.insert(id.clone(), Group { id: id.clone(), name: name.to_owned(), hidden: false, internal: false });
+        plan.groups.insert(
+            id.clone(),
+            Group {
+                id: id.clone(),
+                name: name.to_owned(),
+                hidden: false,
+                internal: false,
+            },
+        );
         id
     }
 
-    fn add_transaction(plan: &mut Plan, account_id: &str, subtransactions: Vec<Subtransaction>) -> String {
+    fn add_transaction(
+        plan: &mut Plan,
+        account_id: &str,
+        subtransactions: Vec<Subtransaction>,
+    ) -> String {
         let id = new_id();
-        let category_id = subtransactions.is_empty().then(|| READY_TO_ASSIGN.to_owned());
+        let category_id = subtransactions
+            .is_empty()
+            .then(|| READY_TO_ASSIGN.to_owned());
         let amount = subtransactions.iter().map(|s| s.amount).sum();
         let t = Transaction {
             id: id.clone(),
@@ -538,8 +674,12 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         super::super::migrations().to_latest(&mut conn).unwrap();
         let mut plan = Plan::new("Household".into(), "USD".into(), 42);
-        let checking =
-            plan.create_account("Checking".into(), AccountType::Checking, None, Some((1000, "2026-10-01".into())));
+        let checking = plan.create_account(
+            "Checking".into(),
+            AccountType::Checking,
+            None,
+            Some((1000, "2026-10-01".into())),
+        );
         plan.create_account(
             "Visa".into(),
             AccountType::CreditCard,
@@ -555,8 +695,15 @@ mod tests {
             memo: memo.map(str::to_owned),
         };
         let early = add_transaction(&mut plan, &checking, vec![]);
-        let split = add_transaction(&mut plan, &checking, vec![line(-3, &a, Some("x")), line(-4, &b, None)]);
-        plan.assigned.entry(a.clone()).or_default().insert("2026-10".parse().unwrap(), 7);
+        let split = add_transaction(
+            &mut plan,
+            &checking,
+            vec![line(-3, &a, Some("x")), line(-4, &b, None)],
+        );
+        plan.assigned
+            .entry(a.clone())
+            .or_default()
+            .insert("2026-10".parse().unwrap(), 7);
         write_plan(&conn, None, &plan).unwrap();
         assert_holds(&conn, &plan);
 
@@ -572,12 +719,19 @@ mod tests {
         plan.delete_category(&c, Some(&d));
         plan.transactions.shift_remove(&early);
         let t = plan.transactions.get_mut(&split).unwrap();
-        t.subtransactions = vec![line(-1, &d, None), line(-2, &d, None), line(-4, &b, Some("y"))];
+        t.subtransactions = vec![
+            line(-1, &d, None),
+            line(-2, &d, None),
+            line(-4, &b, Some("y")),
+        ];
         t.amount = -7;
         add_transaction(&mut plan, &checking, vec![]);
         let unused = plan.payee_by_name("Unused");
         plan.assigned.remove(&a);
-        plan.assigned.entry(d.clone()).or_default().insert("2026-11".parse().unwrap(), -2);
+        plan.assigned
+            .entry(d.clone())
+            .or_default()
+            .insert("2026-11".parse().unwrap(), -2);
         write_plan(&conn, Some(&old), &plan).unwrap();
         assert_holds(&conn, &plan);
 

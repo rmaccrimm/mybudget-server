@@ -16,7 +16,10 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self {
+            status,
+            message: message.into(),
+        }
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -39,6 +42,12 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(ErrorBody { error: self.message })).into_response()
+        (
+            self.status,
+            Json(ErrorBody {
+                error: self.message,
+            }),
+        )
+            .into_response()
     }
 }

@@ -18,16 +18,35 @@ struct Fixture {
 fn setup() -> Fixture {
     let s = start();
     let p = new_plan(&s);
-    let body =
-        r#"{"name": "Checking", "type": "checking", "starting_balance": 3000000, "starting_date": "2026-10-01"}"#;
-    let checking = id(&expect(post(&s, &format!("/plans/{p}/accounts"), body), 201));
-    let g = id(&expect(post(&s, &format!("/plans/{p}/category_groups"), r#"{"name": "Everyday"}"#), 201));
+    let body = r#"{"name": "Checking", "type": "checking", "starting_balance": 3000000, "starting_date": "2026-10-01"}"#;
+    let checking = id(&expect(
+        post(&s, &format!("/plans/{p}/accounts"), body),
+        201,
+    ));
+    let g = id(&expect(
+        post(
+            &s,
+            &format!("/plans/{p}/category_groups"),
+            r#"{"name": "Everyday"}"#,
+        ),
+        201,
+    ));
     let cat = |name: &str| {
         let body = json!({"group_id": g, "name": name}).to_string();
-        id(&expect(post(&s, &format!("/plans/{p}/categories"), &body), 201))
+        id(&expect(
+            post(&s, &format!("/plans/{p}/categories"), &body),
+            201,
+        ))
     };
     let (groceries, rent, dining) = (cat("Groceries"), cat("Rent"), cat("Dining"));
-    let f = Fixture { s, p, checking, groceries, rent, dining };
+    let f = Fixture {
+        s,
+        p,
+        checking,
+        groceries,
+        rent,
+        dining,
+    };
     f.assign("2026-10", &f.groceries, 400000);
     f.assign("2026-10", &f.rent, 1200000);
     f.assign("2026-10", &f.dining, 50000);
@@ -44,12 +63,22 @@ impl Fixture {
 
     fn assign(&self, month: &str, cat: &str, amount: i64) {
         let body = json!({"assigned": amount}).to_string();
-        expect(patch(&self.s, &self.path(&format!("months/{month}/categories/{cat}")), &body), 200);
+        expect(
+            patch(
+                &self.s,
+                &self.path(&format!("months/{month}/categories/{cat}")),
+                &body,
+            ),
+            200,
+        );
     }
 
     fn transaction(&self, mut body: Value) -> Value {
         body["account_id"] = json!(self.checking);
-        expect(post(&self.s, &self.path("transactions"), &body.to_string()), 201)
+        expect(
+            post(&self.s, &self.path("transactions"), &body.to_string()),
+            201,
+        )
     }
 
     fn delete(&self, cat: &str, query: &str) -> Resp {
@@ -62,7 +91,12 @@ impl Fixture {
 
     fn category_ids(&self) -> Vec<String> {
         let groups = expect(self.get("categories"), 200);
-        groups.as_array().unwrap().iter().flat_map(|g| g["categories"].as_array().unwrap().iter().map(id)).collect()
+        groups
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["categories"].as_array().unwrap().iter().map(id))
+            .collect()
     }
 }
 
@@ -76,20 +110,32 @@ fn in_use_needs_reassign_to() {
 #[test]
 fn reassigns_transactions_and_assigned() {
     let f = setup();
-    let split = f.transaction(json!({"date": "2026-10-12", "amount": -10000, "subtransactions": [
-        {"amount": -4000, "category_id": f.dining, "memo": "tip"},
-        {"amount": -6000, "category_id": f.rent},
-    ]}));
-    assert_eq!(f.delete(&f.dining, &format!("?reassign_to={}", f.groceries)).status, 204);
+    let split = f.transaction(
+        json!({"date": "2026-10-12", "amount": -10000, "subtransactions": [
+            {"amount": -4000, "category_id": f.dining, "memo": "tip"},
+            {"amount": -6000, "category_id": f.rent},
+        ]}),
+    );
+    assert_eq!(
+        f.delete(&f.dining, &format!("?reassign_to={}", f.groceries))
+            .status,
+        204
+    );
 
-    let entry = expect(f.get(&format!("months/2026-10/categories/{}", f.groceries)), 200);
+    let entry = expect(
+        f.get(&format!("months/2026-10/categories/{}", f.groceries)),
+        200,
+    );
     assert_eq!(
         entry,
         json!({"category_id": f.groceries, "assigned": 450000, "activity": -204000, "available": 246000,
                "cash_overspending": 0, "credit_overspending": 0})
     );
     let split = expect(f.get(&format!("transactions/{}", id(&split))), 200);
-    assert_eq!(split["subtransactions"][0], json!({"amount": -4000, "category_id": f.groceries, "memo": "tip"}));
+    assert_eq!(
+        split["subtransactions"][0],
+        json!({"amount": -4000, "category_id": f.groceries, "memo": "tip"})
+    );
     assert_eq!(split["subtransactions"][1]["category_id"], json!(f.rent));
 
     let nov = expect(f.get("months/2026-11"), 200);
@@ -101,11 +147,21 @@ fn reassigns_transactions_and_assigned() {
 #[test]
 fn deleted_category_is_gone() {
     let f = setup();
-    assert_eq!(f.delete(&f.dining, &format!("?reassign_to={}", f.rent)).status, 204);
+    assert_eq!(
+        f.delete(&f.dining, &format!("?reassign_to={}", f.rent))
+            .status,
+        204
+    );
     err(&f.get(&format!("categories/{}", f.dining)), 404);
-    err(&f.get(&format!("months/2026-10/categories/{}", f.dining)), 404);
+    err(
+        &f.get(&format!("months/2026-10/categories/{}", f.dining)),
+        404,
+    );
     err(&f.delete(&f.dining, ""), 404);
-    err(&f.delete(&f.groceries, &format!("?reassign_to={}", f.dining)), 400);
+    err(
+        &f.delete(&f.groceries, &format!("?reassign_to={}", f.dining)),
+        400,
+    );
     let body = json!({"account_id": f.checking, "date": "2026-10-04", "amount": -1, "category_id": f.dining});
     err(&post(&f.s, &f.path("transactions"), &body.to_string()), 400);
 }
@@ -129,12 +185,36 @@ fn invalid_reassign_to() {
         err(&f.delete(&f.dining, &format!("?reassign_to={target}")), 400);
     }
     // Every value is checked; the last counts (SPEC 3.5).
-    err(&f.delete(&f.dining, &format!("?reassign_to=nope&reassign_to={}", f.rent)), 400);
-    assert_eq!(f.delete(&f.dining, &format!("?reassign_to={}&reassign_to={}", f.rent, f.groceries)).status, 204);
-    let entry = expect(f.get(&format!("months/2026-10/categories/{}", f.groceries)), 200);
+    err(
+        &f.delete(
+            &f.dining,
+            &format!("?reassign_to=nope&reassign_to={}", f.rent),
+        ),
+        400,
+    );
+    assert_eq!(
+        f.delete(
+            &f.dining,
+            &format!("?reassign_to={}&reassign_to={}", f.rent, f.groceries)
+        )
+        .status,
+        204
+    );
+    let entry = expect(
+        f.get(&format!("months/2026-10/categories/{}", f.groceries)),
+        200,
+    );
     assert_eq!(entry["assigned"], 450000);
 
     err(&f.delete(payment, ""), 400);
     err(&f.delete("ready_to_assign", ""), 404);
-    err(&req(&f.s, "PUT", &f.path(&format!("categories/{}", f.rent)), Some(b"{}")), 405);
+    err(
+        &req(
+            &f.s,
+            "PUT",
+            &f.path(&format!("categories/{}", f.rent)),
+            Some(b"{}"),
+        ),
+        405,
+    );
 }

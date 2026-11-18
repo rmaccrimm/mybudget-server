@@ -95,11 +95,15 @@ fn name_of_length(field: &str, v: &Json, max: usize) -> Result<String, ApiError>
     let s = string(field, v)?;
     let len = s.chars().count();
     if len == 0 || len > max {
-        return Err(ApiError::bad_request(format!("{field} must have 1 to {max} characters")));
+        return Err(ApiError::bad_request(format!(
+            "{field} must have 1 to {max} characters"
+        )));
     }
     // char::is_whitespace is Unicode's White_Space property.
     if s.chars().all(char::is_whitespace) {
-        return Err(ApiError::bad_request(format!("{field} must not be only whitespace")));
+        return Err(ApiError::bad_request(format!(
+            "{field} must not be only whitespace"
+        )));
     }
     Ok(s)
 }
@@ -116,7 +120,9 @@ pub fn payee_name(field: &str, v: &Json) -> Result<String, ApiError> {
 fn note_text(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
         Json::String(s) if s.chars().count() <= MAX_NOTE => Ok(s.clone()),
-        _ => Err(ApiError::bad_request(format!("{field} must be null or a string of at most {MAX_NOTE} characters"))),
+        _ => Err(ApiError::bad_request(format!(
+            "{field} must be null or a string of at most {MAX_NOTE} characters"
+        ))),
     }
 }
 
@@ -128,7 +134,9 @@ pub fn note(field: &str, v: &Json) -> Result<Option<String>, ApiError> {
 pub fn boolean(field: &str, v: &Json) -> Result<bool, ApiError> {
     match v {
         Json::Bool(b) => Ok(*b),
-        _ => Err(ApiError::bad_request(format!("{field} must be true or false"))),
+        _ => Err(ApiError::bad_request(format!(
+            "{field} must be true or false"
+        ))),
     }
 }
 
@@ -141,13 +149,17 @@ pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
     };
     match parsed {
         Some(n) if (-MAX_AMOUNT..=MAX_AMOUNT).contains(&n) => Ok(n),
-        _ => Err(ApiError::bad_request(format!("{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"))),
+        _ => Err(ApiError::bad_request(format!(
+            "{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"
+        ))),
     }
 }
 
 /// The error for a date that isn't one (SPEC 3.8).
 pub fn invalid_date(field: &str) -> ApiError {
-    ApiError::bad_request(format!("{field} must be a date YYYY-MM-DD from 1900-01-01 to 2999-12-31"))
+    ApiError::bad_request(format!(
+        "{field} must be a date YYYY-MM-DD from 1900-01-01 to 2999-12-31"
+    ))
 }
 
 pub fn date(field: &str, v: &Json) -> Result<String, ApiError> {
@@ -159,8 +171,12 @@ pub fn date(field: &str, v: &Json) -> Result<String, ApiError> {
 
 pub fn currency(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
-        Json::String(s) if s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase()) => Ok(s.clone()),
-        _ => Err(ApiError::bad_request(format!("{field} must be three uppercase ASCII letters"))),
+        Json::String(s) if s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase()) => {
+            Ok(s.clone())
+        }
+        _ => Err(ApiError::bad_request(format!(
+            "{field} must be three uppercase ASCII letters"
+        ))),
     }
 }
 
@@ -178,7 +194,15 @@ mod tests {
         assert_eq!(amount("a", &num("-0")).unwrap(), 0);
         assert_eq!(amount("a", &num("1000000000000")).unwrap(), MAX_AMOUNT);
         assert_eq!(amount("a", &num("-1000000000000")).unwrap(), -MAX_AMOUNT);
-        for bad in ["1000000000001", "-1000000000001", "1.0", "1e3", "1E3", "-0.0", "99999999999999999999"] {
+        for bad in [
+            "1000000000001",
+            "-1000000000001",
+            "1.0",
+            "1e3",
+            "1E3",
+            "-0.0",
+            "99999999999999999999",
+        ] {
             assert!(amount("a", &num(bad)).is_err(), "{bad}");
         }
         assert!(amount("a", &Json::String("1".into())).is_err());
@@ -188,11 +212,20 @@ mod tests {
     #[test]
     fn variants() {
         let s = |s: &str| Json::String(s.into());
-        assert_eq!(variant::<AccountType>("type", &s("creditCard")).unwrap(), AccountType::CreditCard);
+        assert_eq!(
+            variant::<AccountType>("type", &s("creditCard")).unwrap(),
+            AccountType::CreditCard
+        );
         let err = variant::<AccountType>("type", &s("credit_card")).unwrap_err();
         assert!(err.message.contains("lineOfCredit"), "{}", err.message);
         assert!(variant::<AccountType>("type", &Json::Null).is_err());
-        assert_eq!(nullable(variant)("flag_color", &Json::Null).unwrap(), None::<FlagColor>);
-        assert_eq!(nullable(variant)("flag_color", &s("red")).unwrap(), Some(FlagColor::Red));
+        assert_eq!(
+            nullable(variant)("flag_color", &Json::Null).unwrap(),
+            None::<FlagColor>
+        );
+        assert_eq!(
+            nullable(variant)("flag_color", &s("red")).unwrap(),
+            Some(FlagColor::Red)
+        );
     }
 }

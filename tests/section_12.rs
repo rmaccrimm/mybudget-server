@@ -19,13 +19,34 @@ impl Fx {
 
     fn account(&self, name: &str, kind: &str, starting: i64) -> Value {
         let body = json!({"name": name, "type": kind, "starting_balance": starting, "starting_date": "2026-10-01"});
-        expect(post(&self.s, &format!("/plans/{}/accounts", self.p), &body.to_string()), 201)
+        expect(
+            post(
+                &self.s,
+                &format!("/plans/{}/accounts", self.p),
+                &body.to_string(),
+            ),
+            201,
+        )
     }
 
     fn category(&self, name: &str) -> String {
-        let g = id(&expect(post(&self.s, &format!("/plans/{}/category_groups", self.p), r#"{"name": "G"}"#), 201));
+        let g = id(&expect(
+            post(
+                &self.s,
+                &format!("/plans/{}/category_groups", self.p),
+                r#"{"name": "G"}"#,
+            ),
+            201,
+        ));
         let body = json!({"group_id": g, "name": name});
-        id(&expect(post(&self.s, &format!("/plans/{}/categories", self.p), &body.to_string()), 201))
+        id(&expect(
+            post(
+                &self.s,
+                &format!("/plans/{}/categories", self.p),
+                &body.to_string(),
+            ),
+            201,
+        ))
     }
 
     fn assign(&self, month: &str, cat: &str, amount: i64) {
@@ -40,11 +61,21 @@ impl Fx {
     }
 
     fn txn(&self, body: Value) -> Value {
-        expect(post(&self.s, &format!("/plans/{}/transactions", self.p), &body.to_string()), 201)
+        expect(
+            post(
+                &self.s,
+                &format!("/plans/{}/transactions", self.p),
+                &body.to_string(),
+            ),
+            201,
+        )
     }
 
     fn month(&self, month: &str) -> Value {
-        expect(get(&self.s, &format!("/plans/{}/months/{month}", self.p)), 200)
+        expect(
+            get(&self.s, &format!("/plans/{}/months/{month}", self.p)),
+            200,
+        )
     }
 }
 
@@ -100,7 +131,9 @@ fn funding_order_cash_first_and_cash_advances() {
     let c = f.category("Food");
     f.assign("2026-10", &c, 100000);
     // Cash spends 30, B spends 50, A spends 50 and refunds 10 in the month.
-    f.txn(json!({"account_id": checking, "date": "2026-10-02", "amount": -30000, "category_id": c}));
+    f.txn(
+        json!({"account_id": checking, "date": "2026-10-02", "amount": -30000, "category_id": c}),
+    );
     f.txn(json!({"account_id": b_id, "date": "2026-10-03", "amount": -50000, "category_id": c}));
     f.txn(json!({"account_id": a_id, "date": "2026-10-04", "amount": -50000, "category_id": c}));
     f.txn(json!({"account_id": a_id, "date": "2026-10-05", "amount": 10000, "category_id": c}));
@@ -108,7 +141,10 @@ fn funding_order_cash_first_and_cash_advances() {
     let oct = f.month("2026-10");
     assert_eq!(oct["categories"][0], entry(&pa, 0, 40000, 40000, 0, 0));
     assert_eq!(oct["categories"][1], entry(&pb, 0, 30000, 30000, 0, 0));
-    assert_eq!(oct["categories"][2], entry(&c, 100000, -120000, -20000, 0, 20000));
+    assert_eq!(
+        oct["categories"][2],
+        entry(&c, 100000, -120000, -20000, 0, 20000)
+    );
 
     // A cash advance from B into checking adds to Ready to Assign.
     f.txn(json!({"account_id": checking, "date": "2026-10-06", "amount": 25000, "payee_id": b["transfer_payee_id"]}));
@@ -127,10 +163,15 @@ fn negative_funds_are_cash_overspending() {
     let a = f.account("A", "creditCard", 0);
     let c = f.category("Food");
     f.assign("2026-10", &c, 10000);
-    f.txn(json!({"account_id": checking, "date": "2026-10-02", "amount": -30000, "category_id": c}));
+    f.txn(
+        json!({"account_id": checking, "date": "2026-10-02", "amount": -30000, "category_id": c}),
+    );
     f.txn(json!({"account_id": id(&a), "date": "2026-10-03", "amount": -50000, "category_id": c}));
     let oct = f.month("2026-10");
-    assert_eq!(oct["categories"][1], entry(&c, 10000, -80000, -70000, 20000, 50000));
+    assert_eq!(
+        oct["categories"][1],
+        entry(&c, 10000, -80000, -70000, 20000, 50000)
+    );
     assert_eq!(oct["categories"][0]["activity"], 0);
     let nov = f.month("2026-11");
     assert_eq!(nov["cash_overspending_last_month"], 20000);

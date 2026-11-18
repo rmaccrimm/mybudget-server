@@ -17,9 +17,14 @@ fn body_limits() {
     ] {
         err(&req(&s, "POST", "/plans", Some(bad)), 400);
     }
-    let deep = format!(r#"{{"name": "a", "x": {}1{}}}"#, "[".repeat(63), "]".repeat(63));
+    let deep = format!(
+        r#"{{"name": "a", "x": {}1{}}}"#,
+        "[".repeat(63),
+        "]".repeat(63)
+    );
     assert_eq!(req(&s, "POST", "/plans", Some(deep.as_bytes())).status, 201);
-    let ok = br#"{"name": "a", "x": [1e300, -0, 100000000000000000000000, "\\ud800", {"y": null}]}"#;
+    let ok =
+        br#"{"name": "a", "x": [1e300, -0, 100000000000000000000000, "\\ud800", {"y": null}]}"#;
     assert_eq!(req(&s, "POST", "/plans", Some(ok)).status, 201);
     // Ignored fields may hold any JSON, including keys serde_json treats specially.
     let magic =
@@ -28,31 +33,63 @@ fn body_limits() {
 
     let just_under = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat((1 << 20) - 22));
     assert_eq!(just_under.len(), 1 << 20);
-    assert_eq!(req(&s, "POST", "/plans", Some(just_under.as_bytes())).status, 201);
+    assert_eq!(
+        req(&s, "POST", "/plans", Some(just_under.as_bytes())).status,
+        201
+    );
     let over = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat(1 << 20));
     err(&req(&s, "POST", "/plans", Some(over.as_bytes())), 413);
     let huge = format!(r#"{{"name": "a", "x": "{}"}}"#, "a".repeat(5 << 20));
     err(&req(&s, "POST", "/plans", Some(huge.as_bytes())), 413);
     err(&req(&s, "PATCH", "/plans/nope", Some(huge.as_bytes())), 413);
-    assert_eq!(req(&s, "GET", "/plans", None).json().as_array().unwrap().len(), 4);
+    assert_eq!(
+        req(&s, "GET", "/plans", None)
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
 }
 
 #[test]
 fn routing() {
     let s = start();
     let id = new_plan(&s);
-    for path in ["/plans/", "//plans", "/plans//accounts", "/health/", "/plans/x/months//categories/y"] {
+    for path in [
+        "/plans/",
+        "//plans",
+        "/plans//accounts",
+        "/health/",
+        "/plans/x/months//categories/y",
+    ] {
         err(&get(&s, path), 404);
     }
     // 405 before 404, with the methods the path takes.
-    for (method, path) in [("PUT", "/plans/nope"), ("GET", "/plans/nope/category_groups"), ("FOO", "/plans")] {
+    for (method, path) in [
+        ("PUT", "/plans/nope"),
+        ("GET", "/plans/nope/category_groups"),
+        ("FOO", "/plans"),
+    ] {
         let r = req(&s, method, path, None);
         err(&r, 405);
-        assert!(r.headers.to_ascii_lowercase().contains("\r\nallow: "), "{}", r.headers);
+        assert!(
+            r.headers.to_ascii_lowercase().contains("\r\nallow: "),
+            "{}",
+            r.headers
+        );
     }
     let r = req(&s, "DELETE", "/plans", None);
-    let allow = r.headers.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("allow: ").map(str::to_owned));
-    let mut allow: Vec<String> = allow.unwrap().split(',').map(|m| m.trim().to_owned()).collect();
+    let allow = r.headers.lines().find_map(|l| {
+        l.to_ascii_lowercase()
+            .strip_prefix("allow: ")
+            .map(str::to_owned)
+    });
+    let mut allow: Vec<String> = allow
+        .unwrap()
+        .split(',')
+        .map(|m| m.trim().to_owned())
+        .collect();
     allow.sort();
     assert_eq!(allow, ["get", "head", "post"]);
     // HEAD is GET without the body.
@@ -66,7 +103,13 @@ fn routing() {
     // Query parameters are percent-decoded; unknown ones are ignored.
     let path = format!("/plans/{id}/transactions?since_date=2026%2D01%2D01&x=%ZZ&approved=true");
     assert_eq!(expect(get(&s, &path), 200), serde_json::json!([]));
-    err(&get(&s, &format!("/plans/{id}/transactions?since_date=2026-01-01&since_date=2026-02-30")), 400);
+    err(
+        &get(
+            &s,
+            &format!("/plans/{id}/transactions?since_date=2026-01-01&since_date=2026-02-30"),
+        ),
+        400,
+    );
 }
 
 #[test]
@@ -78,7 +121,12 @@ fn plans_crud_and_errors() {
     err(&req(&s, "DELETE", "/plans", None), 405);
     err(&req(&s, "PUT", "/health", None), 405);
 
-    let r = req(&s, "POST", "/plans", Some(br#"{"name": "Household", "extra": 1}"#));
+    let r = req(
+        &s,
+        "POST",
+        "/plans",
+        Some(br#"{"name": "Household", "extra": 1}"#),
+    );
     assert_eq!(r.status, 201);
     let p = r.json();
     assert_eq!(p["name"], "Household");
@@ -104,11 +152,34 @@ fn plans_crud_and_errors() {
         err(&req(&s, "POST", "/plans", Some(bad)), 400);
     }
     let long: String = "é".repeat(100);
-    assert_eq!(req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{long}"}}"#).as_bytes())).status, 201);
-    err(&req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{long}x"}}"#).as_bytes())), 400);
+    assert_eq!(
+        req(
+            &s,
+            "POST",
+            "/plans",
+            Some(format!(r#"{{"name": "{long}"}}"#).as_bytes())
+        )
+        .status,
+        201
+    );
+    err(
+        &req(
+            &s,
+            "POST",
+            "/plans",
+            Some(format!(r#"{{"name": "{long}x"}}"#).as_bytes()),
+        ),
+        400,
+    );
     // Paired surrogates are fine.
     assert_eq!(
-        req(&s, "POST", "/plans", Some(format!(r#"{{"name": "{}ud83d{}ude00"}}"#, '\\', '\\').as_bytes())).status,
+        req(
+            &s,
+            "POST",
+            "/plans",
+            Some(format!(r#"{{"name": "{}ud83d{}ude00"}}"#, '\\', '\\').as_bytes())
+        )
+        .status,
         201
     );
 
@@ -121,8 +192,19 @@ fn plans_crud_and_errors() {
     assert_eq!(r.status, 200);
     assert_eq!(r.json()["currency_code"], "EUR");
     assert_eq!(r.json()["name"], "Household");
-    assert_eq!(req(&s, "PATCH", &path, Some(b"{}")).json()["currency_code"], "EUR");
-    err(&req(&s, "PATCH", &path, Some(br#"{"name": "New", "currency_code": "x"}"#)), 400);
+    assert_eq!(
+        req(&s, "PATCH", &path, Some(b"{}")).json()["currency_code"],
+        "EUR"
+    );
+    err(
+        &req(
+            &s,
+            "PATCH",
+            &path,
+            Some(br#"{"name": "New", "currency_code": "x"}"#),
+        ),
+        400,
+    );
     assert_eq!(req(&s, "GET", &path, None).json()["name"], "Household");
     err(&req(&s, "POST", &path, None), 405);
     err(&req(&s, "PATCH", "/plans/missing", Some(b"bad")), 404);

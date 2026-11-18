@@ -29,8 +29,8 @@ use records::{read_plan, write_plan};
 /// Every schema version's migration: version `n` is the state after the
 /// first `n` (SPEC 15.8). A shipped migration never changes; each change to
 /// what a plan file holds adds one.
-const MIGRATIONS: &[M] =
-    &[M::up(include_str!("../../migrations/01-plans/up.sql")).down(include_str!("../../migrations/01-plans/down.sql"))];
+const MIGRATIONS: &[M] = &[M::up(include_str!("../../migrations/01-plans/up.sql"))
+    .down(include_str!("../../migrations/01-plans/down.sql"))];
 
 /// The schema version this server writes.
 const LATEST: usize = MIGRATIONS.len();
@@ -45,7 +45,10 @@ pub type Failure = Box<dyn Error + Send + Sync>;
 
 /// Opens an existing file, never creating one.
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
 }
 
 /// The schema version of a plan file the server knows, from 1 to [`LATEST`]
@@ -54,7 +57,9 @@ fn schema_version(conn: &Connection) -> Result<usize, Failure> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     match usize::try_from(version) {
         Ok(v @ 1..=LATEST) => Ok(v),
-        Ok(v) if v > LATEST => Err(format!("its schema version, {v}, is newer than this server's, {LATEST}").into()),
+        Ok(v) if v > LATEST => {
+            Err(format!("its schema version, {v}, is newer than this server's, {LATEST}").into())
+        }
         _ => Err(format!("it isn't a plan file: its schema version is {version}").into()),
     }
 }
@@ -92,7 +97,8 @@ fn upgrade(path: &Path) -> Result<(), Failure> {
 /// so what's left holds nothing the file needs, and is deleted.
 fn prepare(path: &Path) -> Result<(), Failure> {
     upgrade(path)?;
-    let mode: String = connect(path)?.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))?;
+    let mode: String =
+        connect(path)?.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("delete") {
         return Err(format!("it can't leave journal mode {mode}").into());
     }
@@ -152,7 +158,8 @@ impl PlanFiles {
     /// and reads the plans in it, oldest first (SPEC 15.5). Files the server
     /// can't use are skipped (SPEC 15.7).
     pub fn open(dir: &Path) -> Result<(Self, Vec<Plan>), String> {
-        let unusable = |e: io::Error| format!("can't use the data directory {}: {e}", dir.display());
+        let unusable =
+            |e: io::Error| format!("can't use the data directory {}: {e}", dir.display());
         fs::create_dir_all(dir).map_err(unusable)?;
         check_writable(dir).map_err(unusable)?;
         let mut paths = Vec::new();
@@ -180,7 +187,10 @@ impl PlanFiles {
         let mut plans = Vec::new();
         for (path, plan) in read {
             if files_per_plan[&plan.info.id] > 1 {
-                skip(&path, format_args!("another file also holds plan {}", plan.info.id));
+                skip(
+                    &path,
+                    format_args!("another file also holds plan {}", plan.info.id),
+                );
                 continue;
             }
             // The first change to the file, made once it's known to be
@@ -194,7 +204,13 @@ impl PlanFiles {
             }
         }
         plans.sort_by(|a, b| (a.created_at, &a.info.id).cmp(&(b.created_at, &b.info.id)));
-        Ok((Self { dir: dir.to_owned(), paths }, plans))
+        Ok((
+            Self {
+                dir: dir.to_owned(),
+                paths,
+            },
+            plans,
+        ))
     }
 
     /// The path a plan's file gets, never one that something in the
@@ -233,7 +249,11 @@ impl PlanFiles {
         fs::rename(path, &renamed)?;
         if let Err(e) = write_file(&renamed, Some(old), new) {
             if let Err(undo) = fs::rename(&renamed, path) {
-                eprintln!("couldn't rename {} back to {}: {undo}", renamed.display(), path.display());
+                eprintln!(
+                    "couldn't rename {} back to {}: {undo}",
+                    renamed.display(),
+                    path.display()
+                );
             }
             return Err(e);
         }

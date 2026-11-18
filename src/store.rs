@@ -26,7 +26,10 @@ pub struct Store {
 /// goes to stderr, for whoever runs the server.
 fn unsaved(plan_id: &str, cause: impl std::fmt::Display) -> ApiError {
     eprintln!("couldn't save plan {plan_id}: {cause}");
-    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "the server couldn't save the change")
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the server couldn't save the change",
+    )
 }
 
 impl Store {
@@ -34,7 +37,10 @@ impl Store {
     /// (SPEC 15.1, 15.5).
     pub fn open(dir: &Path) -> Result<Self, String> {
         let (files, plans) = PlanFiles::open(dir)?;
-        Ok(Self { plans: plans.into_iter().map(|p| (p.info.id.clone(), p)).collect(), files: Some(files) })
+        Ok(Self {
+            plans: plans.into_iter().map(|p| (p.info.id.clone(), p)).collect(),
+            files: Some(files),
+        })
     }
 
     pub fn plans(&self) -> impl Iterator<Item = &Plan> {
@@ -49,9 +55,15 @@ impl Store {
     /// listed in follows from their creation times after a restart, even if
     /// a plan file came from a computer whose clock was ahead (SPEC 15.5).
     fn next_created_at(&self) -> i64 {
-        let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        let now = i64::try_from(since_epoch.as_micros()).expect("the clock is before the year 294000");
-        self.plans.values().map(|p| p.created_at + 1).fold(now, i64::max)
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let now =
+            i64::try_from(since_epoch.as_micros()).expect("the clock is before the year 294000");
+        self.plans
+            .values()
+            .map(|p| p.created_at + 1)
+            .fold(now, i64::max)
     }
 
     pub fn create_plan(&mut self, name: String, currency_code: String) -> Result<&Plan, ApiError> {
@@ -65,7 +77,11 @@ impl Store {
     /// Makes `change` to the plan, saving it first. `change` can't fail: the
     /// caller has checked the request (SPEC 3.11), and only the save can
     /// still fail, before anything has changed (SPEC 15.10).
-    pub fn change_plan<R>(&mut self, id: &str, change: impl FnOnce(&mut Plan) -> R) -> Result<R, ApiError> {
+    pub fn change_plan<R>(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut Plan) -> R,
+    ) -> Result<R, ApiError> {
         let plan = self.plans.by_id_mut(id)?;
         let Some(files) = &mut self.files else {
             return Ok(change(plan));

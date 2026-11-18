@@ -13,10 +13,18 @@ use crate::error::ApiError;
 use crate::fields::{self, Body};
 use crate::model::{AccountType, ById};
 
-pub async fn list(State(state): State<AppState>, Path(plan_id): Path<String>) -> Result<impl IntoResponse, ApiError> {
+pub async fn list(
+    State(state): State<AppState>,
+    Path(plan_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     let plan = store.plan(&plan_id)?;
-    Ok(Json(plan.accounts.keys().map(|id| plan.account_view(id)).collect::<Vec<_>>()))
+    Ok(Json(
+        plan.accounts
+            .keys()
+            .map(|id| plan.account_view(id))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 pub async fn get(
@@ -40,7 +48,9 @@ pub async fn create(
     let name = body.required("name", fields::name)?;
     let kind = body.required("type", fields::variant)?;
     let note = body.optional("note", fields::note)?.flatten();
-    let starting_balance = body.optional("starting_balance", fields::amount)?.unwrap_or(0);
+    let starting_balance = body
+        .optional("starting_balance", fields::amount)?
+        .unwrap_or(0);
     // Checked even when the starting balance is 0 and leaves it unused
     // (SPEC 3.6, 5.2).
     let starting_date = body.optional("starting_date", fields::date)?;
@@ -48,7 +58,9 @@ pub async fn create(
         _ if starting_balance == 0 => None,
         Some(date) => Some((starting_balance, date)),
         None => {
-            return Err(ApiError::bad_request("starting_date is required when starting_balance isn't 0"));
+            return Err(ApiError::bad_request(
+                "starting_date is required when starting_balance isn't 0",
+            ));
         }
     };
     let view = store.change_plan(&plan_id, |plan| {
@@ -70,11 +82,16 @@ pub async fn update(
     let name = body.optional("name", fields::name)?;
     let note = body.optional("note", fields::note)?;
     let closed = body.optional("closed", fields::boolean)?;
-    if body.optional("type", fields::variant::<AccountType>)?.is_some_and(|kind| kind != account.kind) {
+    if body
+        .optional("type", fields::variant::<AccountType>)?
+        .is_some_and(|kind| kind != account.kind)
+    {
         return Err(ApiError::bad_request("an account's type can't change"));
     }
     if closed == Some(true) && !account.closed && plan.balances(&account_id).balance != 0 {
-        return Err(ApiError::conflict("an account can only be closed when its balance is 0"));
+        return Err(ApiError::conflict(
+            "an account can only be closed when its balance is 0",
+        ));
     }
 
     let view = store.change_plan(&plan_id, |plan| {

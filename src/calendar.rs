@@ -32,11 +32,15 @@ impl Month {
     }
 
     pub fn prev(self) -> Self {
-        Self { index: self.index - 1 }
+        Self {
+            index: self.index - 1,
+        }
     }
 
     pub fn next(self) -> Self {
-        Self { index: self.index + 1 }
+        Self {
+            index: self.index + 1,
+        }
     }
 
     /// The month a stored date belongs to (SPEC 3.8).
@@ -58,7 +62,9 @@ impl Month {
 
 /// Parses `n` ASCII digits.
 fn digits(s: &[u8]) -> Option<u32> {
-    s.iter().try_fold(0u32, |acc, &b| b.is_ascii_digit().then(|| acc * 10 + u32::from(b - b'0')))
+    s.iter().try_fold(0u32, |acc, &b| {
+        b.is_ascii_digit().then(|| acc * 10 + u32::from(b - b'0'))
+    })
 }
 
 /// Not a month `YYYY-MM` from `1900-01` to `2999-12`.
@@ -112,7 +118,13 @@ mod tests {
 
     #[test]
     fn dates() {
-        for good in ["1900-01-01", "2999-12-31", "2024-02-29", "2000-02-29", "2026-10-31"] {
+        for good in [
+            "1900-01-01",
+            "2999-12-31",
+            "2024-02-29",
+            "2000-02-29",
+            "2026-10-31",
+        ] {
             assert!(is_date(good), "{good}");
         }
         for bad in [
@@ -141,7 +153,14 @@ mod tests {
         for s in ["1900-01", "2026-10", "2026-12", "2999-12"] {
             assert_eq!(s.parse::<Month>().unwrap().to_string(), s);
         }
-        for bad in ["1899-12", "3000-01", "2026-1", "2026-13", "2026-00", "2026-10-01"] {
+        for bad in [
+            "1899-12",
+            "3000-01",
+            "2026-1",
+            "2026-13",
+            "2026-00",
+            "2026-10-01",
+        ] {
             assert!(bad.parse::<Month>().is_err(), "{bad}");
         }
         let dec: Month = "2026-12".parse().unwrap();

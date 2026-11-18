@@ -12,7 +12,8 @@ use common::*;
 
 fn start_piped(flag: Option<&str>) -> Server {
     start_with(|c| {
-        c.stdin(Stdio::piped()).env_remove("MYBUDGET_EXIT_ON_STDIN_EOF");
+        c.stdin(Stdio::piped())
+            .env_remove("MYBUDGET_EXIT_ON_STDIN_EOF");
         if let Some(v) = flag {
             c.env("MYBUDGET_EXIT_ON_STDIN_EOF", v);
         }
@@ -57,7 +58,10 @@ fn keeps_running_without_the_flag() {
     for flag in [None, Some("0"), Some("true"), Some("")] {
         let mut s = start_piped(flag);
         drop(s.child.stdin.take());
-        assert!(exit_within(&mut s, Duration::from_millis(500)).is_none(), "{flag:?}");
+        assert!(
+            exit_within(&mut s, Duration::from_millis(500)).is_none(),
+            "{flag:?}"
+        );
         assert_eq!(get(&s, "/health").body, "ok");
     }
 }
@@ -65,7 +69,8 @@ fn keeps_running_without_the_flag() {
 #[test]
 fn keeps_running_with_stdin_null_and_no_flag() {
     let mut s = start_with(|c| {
-        c.stdin(Stdio::null()).env_remove("MYBUDGET_EXIT_ON_STDIN_EOF");
+        c.stdin(Stdio::null())
+            .env_remove("MYBUDGET_EXIT_ON_STDIN_EOF");
     });
     assert!(exit_within(&mut s, Duration::from_millis(500)).is_none());
     assert_eq!(get(&s, "/health").body, "ok");
@@ -79,7 +84,10 @@ fn keeps_running_until_eof(stdin: OwnedFd, mut other_end: impl Write) {
         c.stdin(stdin).env("MYBUDGET_EXIT_ON_STDIN_EOF", "1");
     });
     sleep(Duration::from_millis(300));
-    assert!(s.child.try_wait().unwrap().is_none(), "exited with nothing waiting");
+    assert!(
+        s.child.try_wait().unwrap().is_none(),
+        "exited with nothing waiting"
+    );
     other_end.write_all(b"ignored\n").unwrap();
     sleep(Duration::from_millis(300));
     assert!(s.child.try_wait().unwrap().is_none(), "exited after input");
@@ -94,9 +102,15 @@ fn keeps_running_on_a_quiet_non_blocking_pipe() {
     let (reader, writer) = std::io::pipe().unwrap();
     // std can't make a pipe non-blocking; tokio's pipe receiver sets
     // O_NONBLOCK and hands the descriptor back with it still set.
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
     let _guard = runtime.enter();
-    let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into()).unwrap().into_nonblocking_fd().unwrap();
+    let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
+        .unwrap()
+        .into_nonblocking_fd()
+        .unwrap();
     keeps_running_until_eof(reader, writer);
 }
 

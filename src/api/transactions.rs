@@ -19,7 +19,8 @@ use crate::error::ApiError;
 use crate::fields::{self, Body, nullable};
 use crate::json::Json as JsonValue;
 use crate::model::{
-    Account, AccountType, ById, Cleared, FlagColor, Plan, READY_TO_ASSIGN, Subtransaction, Transaction, new_id,
+    Account, AccountType, ById, Cleared, FlagColor, Plan, READY_TO_ASSIGN, Subtransaction,
+    Transaction, new_id,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,9 @@ fn category_id(plan: &Plan, field: &str, v: &JsonValue) -> Result<Option<String>
         && id != READY_TO_ASSIGN
         && !plan.categories.contains_key(id)
     {
-        return Err(ApiError::bad_request(format!("{field} doesn't name one of the plan's categories")));
+        return Err(ApiError::bad_request(format!(
+            "{field} doesn't name one of the plan's categories"
+        )));
     }
     Ok(id)
 }
@@ -48,7 +51,11 @@ struct SubInput {
 
 impl From<&Subtransaction> for SubInput {
     fn from(s: &Subtransaction) -> Self {
-        Self { amount: s.amount, category_id: Some(s.category_id.clone()), memo: s.memo.clone() }
+        Self {
+            amount: s.amount,
+            category_id: Some(s.category_id.clone()),
+            memo: s.memo.clone(),
+        }
     }
 }
 
@@ -90,7 +97,9 @@ impl Input {
         if let Some(Some(id)) = &payee_id
             && !plan.payees.contains_key(id)
         {
-            return Err(ApiError::bad_request("payee_id doesn't name one of the plan's payees"));
+            return Err(ApiError::bad_request(
+                "payee_id doesn't name one of the plan's payees",
+            ));
         }
         let payee_name = body.optional("payee_name", nullable(fields::payee_name))?;
         Ok(Self {
@@ -103,7 +112,8 @@ impl Input {
             cleared: body.optional("cleared", fields::variant)?,
             approved: body.optional("approved", fields::boolean)?,
             flag_color: body.optional("flag_color", nullable(fields::variant))?,
-            subtransactions: body.optional("subtransactions", |f, v| subtransactions(plan, f, v))?,
+            subtransactions: body
+                .optional("subtransactions", |f, v| subtransactions(plan, f, v))?,
         })
     }
 }
@@ -123,7 +133,10 @@ impl PayeeChoice {
     /// The payee a body asks for, or `None` if it leaves the payee as it is.
     /// A `payee_id` wins over a `payee_name`; `payee_id: null` asks for no
     /// payee, and `payee_name: null` alone asks for nothing.
-    fn requested(payee_id: Option<Option<String>>, payee_name: Option<Option<String>>) -> Option<Self> {
+    fn requested(
+        payee_id: Option<Option<String>>,
+        payee_name: Option<Option<String>>,
+    ) -> Option<Self> {
         match (payee_id, payee_name) {
             (Some(Some(id)), _) => Some(Self::Id(id)),
             (_, Some(Some(name))) => Some(Self::Name(name)),
@@ -184,21 +197,33 @@ impl CategorySide {
 
 /// The account a payee transfers to, if it's a transfer payee (SPEC 8.3).
 fn transfer_target<'a>(plan: &'a Plan, payee: &PayeeChoice) -> Option<&'a Account> {
-    let PayeeChoice::Id(id) = payee else { return None };
+    let PayeeChoice::Id(id) = payee else {
+        return None;
+    };
     let account_id = plan.payees.get(id)?.transfer_account_id.as_ref()?;
     plan.accounts.get(account_id)
 }
 
 /// A category in an on-budget account: required, and a user category or
 /// Ready to Assign, never a payment category (SPEC 8.2).
-fn check_on_budget_category(plan: &Plan, field: &str, category: Option<&str>) -> Result<(), ApiError> {
+fn check_on_budget_category(
+    plan: &Plan,
+    field: &str,
+    category: Option<&str>,
+) -> Result<(), ApiError> {
     match category {
-        None => Err(ApiError::bad_request(format!("{field} is required in an on-budget account"))),
+        None => Err(ApiError::bad_request(format!(
+            "{field} is required in an on-budget account"
+        ))),
         Some(READY_TO_ASSIGN) => Ok(()),
         Some(id) => match plan.categories.get(id) {
             Some(c) if c.payment_account_id.is_none() => Ok(()),
-            Some(_) => Err(ApiError::bad_request(format!("{field} can't be a credit card payment category"))),
-            None => Err(ApiError::bad_request(format!("{field} doesn't name one of the plan's categories"))),
+            Some(_) => Err(ApiError::bad_request(format!(
+                "{field} can't be a credit card payment category"
+            ))),
+            None => Err(ApiError::bad_request(format!(
+                "{field} doesn't name one of the plan's categories"
+            ))),
         },
     }
 }
@@ -211,7 +236,11 @@ struct Transfer<'a> {
 
 /// Checks every rule a transaction must meet (SPEC 8.2, 9.2, 9.3, 10.1,
 /// 10.2) in `account`. Returns where it transfers to, if it's a transfer.
-fn validate<'a>(plan: &'a Plan, account: &Account, d: &Desired) -> Result<Option<Transfer<'a>>, ApiError> {
+fn validate<'a>(
+    plan: &'a Plan,
+    account: &Account,
+    d: &Desired,
+) -> Result<Option<Transfer<'a>>, ApiError> {
     let on_budget = account.kind.on_budget();
     let target = transfer_target(plan, &d.payee);
     if let Some(to) = target {
@@ -224,7 +253,9 @@ fn validate<'a>(plan: &'a Plan, account: &Account, d: &Desired) -> Result<Option
         let side = category_side(account.kind, to.kind);
         match side {
             CategorySide::Neither if d.category.is_some() => {
-                return Err(ApiError::bad_request("category_id must be null on a transfer between these accounts"));
+                return Err(ApiError::bad_request(
+                    "category_id must be null on a transfer between these accounts",
+                ));
             }
             CategorySide::Neither => {}
             CategorySide::This | CategorySide::Other => {
@@ -235,22 +266,34 @@ fn validate<'a>(plan: &'a Plan, account: &Account, d: &Desired) -> Result<Option
     }
     if !d.subs.is_empty() {
         if !on_budget {
-            return Err(ApiError::bad_request("a tracking account's transactions can't be split"));
+            return Err(ApiError::bad_request(
+                "a tracking account's transactions can't be split",
+            ));
         }
         if d.category.is_some() {
-            return Err(ApiError::bad_request("a split's own category_id must be null"));
+            return Err(ApiError::bad_request(
+                "a split's own category_id must be null",
+            ));
         }
         let sum: i128 = d.subs.iter().map(|s| i128::from(s.amount)).sum();
         if sum != i128::from(d.amount) {
-            return Err(ApiError::bad_request("the subtransactions' amounts must add up to the transaction's amount"));
+            return Err(ApiError::bad_request(
+                "the subtransactions' amounts must add up to the transaction's amount",
+            ));
         }
         for s in &d.subs {
-            check_on_budget_category(plan, "a subtransaction's category_id", s.category_id.as_deref())?;
+            check_on_budget_category(
+                plan,
+                "a subtransaction's category_id",
+                s.category_id.as_deref(),
+            )?;
         }
     } else if on_budget {
         check_on_budget_category(plan, "category_id", d.category.as_deref())?;
     } else if d.category.is_some() {
-        return Err(ApiError::bad_request("category_id must be null in a tracking account"));
+        return Err(ApiError::bad_request(
+            "category_id must be null in a tracking account",
+        ));
     }
     Ok(None)
 }
@@ -330,7 +373,10 @@ impl Desired {
             .iter()
             .map(|s| Subtransaction {
                 amount: s.amount,
-                category_id: s.category_id.clone().expect("validate checked every split line has a category"),
+                category_id: s
+                    .category_id
+                    .clone()
+                    .expect("validate checked every split line has a category"),
                 memo: s.memo.clone(),
             })
             .collect();
@@ -339,7 +385,10 @@ impl Desired {
 
 /// The categories of a transaction and of its other half, if it's a
 /// transfer.
-fn place_category(transfer: Option<&Transfer>, category: Option<String>) -> (Option<String>, Option<String>) {
+fn place_category(
+    transfer: Option<&Transfer>,
+    category: Option<String>,
+) -> (Option<String>, Option<String>) {
     match transfer {
         Some(x) => x.side.split(category),
         None => (category, None),
@@ -358,13 +407,14 @@ pub async fn create(
     let plan = store.plan(&plan_id)?;
     let body = Body::parse(&body)?;
     let input = Input::parse(plan, &body)?;
-    let account_id = input.account_id.ok_or_else(|| fields::missing("account_id"))?;
+    let account_id = input
+        .account_id
+        .ok_or_else(|| fields::missing("account_id"))?;
     let date = input.date.ok_or_else(|| fields::missing("date"))?;
     let amount = input.amount.ok_or_else(|| fields::missing("amount"))?;
-    let account = plan
-        .accounts
-        .get(&account_id)
-        .ok_or_else(|| ApiError::bad_request("account_id doesn't name one of the plan's accounts"))?;
+    let account = plan.accounts.get(&account_id).ok_or_else(|| {
+        ApiError::bad_request("account_id doesn't name one of the plan's accounts")
+    })?;
     let d = Desired {
         date,
         amount,
@@ -378,7 +428,11 @@ pub async fn create(
     };
     let transfer = validate(plan, account, &d)?;
 
-    let mut t = Transaction { id: new_id(), account_id, ..Default::default() };
+    let mut t = Transaction {
+        id: new_id(),
+        account_id,
+        ..Default::default()
+    };
     d.apply(&mut t);
     let half = transfer.as_ref().map(|x| other_half(&mut t, account, x.to));
     let (category, other_category) = place_category(transfer.as_ref(), d.category);
@@ -403,7 +457,13 @@ pub async fn get(
     Path((plan_id, transaction_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
-    Ok(Json(store.plan(&plan_id)?.transactions.by_id(&transaction_id)?.clone()))
+    Ok(Json(
+        store
+            .plan(&plan_id)?
+            .transactions
+            .by_id(&transaction_id)?
+            .clone(),
+    ))
 }
 
 pub async fn update(
@@ -416,15 +476,34 @@ pub async fn update(
     let mut t = plan.transactions.by_id(&transaction_id)?.clone();
     let body = Body::parse(&body)?;
     let input = Input::parse(plan, &body)?;
-    if input.account_id.as_ref().is_some_and(|a| *a != t.account_id) {
-        return Err(ApiError::bad_request("a transaction's account can't change"));
+    if input
+        .account_id
+        .as_ref()
+        .is_some_and(|a| *a != t.account_id)
+    {
+        return Err(ApiError::bad_request(
+            "a transaction's account can't change",
+        ));
     }
-    let account = plan.accounts.get(&t.account_id).expect("a transaction's account exists");
-    let payee = input.payee.unwrap_or_else(|| PayeeChoice::from_id(t.payee_id.clone()));
-    let subs = input.subtransactions.unwrap_or_else(|| t.subtransactions.iter().map(SubInput::from).collect());
+    let account = plan
+        .accounts
+        .get(&t.account_id)
+        .expect("a transaction's account exists");
+    let payee = input
+        .payee
+        .unwrap_or_else(|| PayeeChoice::from_id(t.payee_id.clone()));
+    let subs = input
+        .subtransactions
+        .unwrap_or_else(|| t.subtransactions.iter().map(SubInput::from).collect());
     let category = match input.category_id {
         Some(category) => category,
-        None => kept_category(plan, &t, account, transfer_target(plan, &payee), !subs.is_empty()),
+        None => kept_category(
+            plan,
+            &t,
+            account,
+            transfer_target(plan, &payee),
+            !subs.is_empty(),
+        ),
     };
     let d = Desired {
         date: input.date.unwrap_or_else(|| t.date.clone()),
@@ -442,14 +521,19 @@ pub async fn update(
     d.apply(&mut t);
     // The other half stays only if it's still in the account transferred
     // to (SPEC 9.5); otherwise it goes, and a new one comes if needed.
-    let keeps_partner = transfer.as_ref().is_some_and(|x| t.transfer_account_id.as_ref() == Some(&x.to.id));
+    let keeps_partner = transfer
+        .as_ref()
+        .is_some_and(|x| t.transfer_account_id.as_ref() == Some(&x.to.id));
     let dropped_partner = if keeps_partner {
         None
     } else {
         t.transfer_account_id = None;
         t.transfer_transaction_id.take()
     };
-    let new_half = transfer.as_ref().filter(|_| !keeps_partner).map(|x| other_half(&mut t, account, x.to));
+    let new_half = transfer
+        .as_ref()
+        .filter(|_| !keeps_partner)
+        .map(|x| other_half(&mut t, account, x.to));
     let (category, other_category) = place_category(transfer.as_ref(), d.category);
     t.category_id = category;
 
@@ -462,8 +546,14 @@ pub async fn update(
         t.payee_id = resolve_payee(plan, d.payee);
         if keeps_partner {
             // Date and amount follow on the other half (SPEC 9.4).
-            let id = t.transfer_transaction_id.as_ref().expect("a transfer links its other half");
-            let partner = plan.transactions.get_mut(id).expect("a transfer's other half exists");
+            let id = t
+                .transfer_transaction_id
+                .as_ref()
+                .expect("a transfer links its other half");
+            let partner = plan
+                .transactions
+                .get_mut(id)
+                .expect("a transfer's other half exists");
             partner.date = t.date.clone();
             partner.amount = -t.amount;
             partner.category_id = other_category;
@@ -510,7 +600,11 @@ pub async fn list(
     let (mut since, mut until, mut approved) = (None, None, None);
     for (key, value) in query {
         let date = |v: String| {
-            if calendar::is_date(&v) { Ok(v) } else { Err(fields::invalid_date(&key)) }
+            if calendar::is_date(&v) {
+                Ok(v)
+            } else {
+                Err(fields::invalid_date(&key))
+            }
         };
         match key.as_str() {
             "account_id" => account_id = Some(value),
@@ -532,7 +626,11 @@ pub async fn list(
         .transactions
         .values()
         .filter(|t| account_id.as_ref().is_none_or(|a| &t.account_id == a))
-        .filter(|t| payee_id.as_ref().is_none_or(|p| t.payee_id.as_ref() == Some(p)))
+        .filter(|t| {
+            payee_id
+                .as_ref()
+                .is_none_or(|p| t.payee_id.as_ref() == Some(p))
+        })
         .filter(|t| category_id.as_ref().is_none_or(|c| t.has_category(c)))
         .filter(|t| since.as_ref().is_none_or(|d| &t.date >= d))
         .filter(|t| until.as_ref().is_none_or(|d| &t.date <= d))

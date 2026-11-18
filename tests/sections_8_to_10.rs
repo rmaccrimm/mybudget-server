@@ -35,10 +35,21 @@ fn setup() -> Fixture {
     let sv = account(&s, &p, r#"{"name": "Savings", "type": "savings"}"#);
     let a = account(&s, &p, r#"{"name": "House", "type": "otherAsset"}"#);
     let v = account(&s, &p, r#"{"name": "Visa", "type": "creditCard"}"#);
-    let g = id(&expect(post(&s, &format!("/plans/{p}/category_groups"), r#"{"name": "Everyday"}"#), 201));
+    let g = id(&expect(
+        post(
+            &s,
+            &format!("/plans/{p}/category_groups"),
+            r#"{"name": "Everyday"}"#,
+        ),
+        201,
+    ));
     let cat = |name: &str| {
         id(&expect(
-            post(&s, &format!("/plans/{p}/categories"), &format!(r#"{{"group_id": "{g}", "name": "{name}"}}"#)),
+            post(
+                &s,
+                &format!("/plans/{p}/categories"),
+                &format!(r#"{{"group_id": "{g}", "name": "{name}"}}"#),
+            ),
             201,
         ))
     };
@@ -76,7 +87,10 @@ impl Fixture {
         patch(&self.s, &self.txn(id), body)
     }
     fn account(&self, id: &str) -> Value {
-        expect(get(&self.s, &format!("/plans/{}/accounts/{id}", self.p)), 200)
+        expect(
+            get(&self.s, &format!("/plans/{}/accounts/{id}", self.p)),
+            200,
+        )
     }
 }
 
@@ -106,7 +120,12 @@ fn create_list_and_patch() {
     assert_eq!(again["payee_id"], payee.as_str());
 
     let all = expect(get(&f.s, &f.txns()), 200);
-    let ids: Vec<&str> = all.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids.len(), 4);
     // The starting balance transaction comes first (SPEC 5.3).
     assert_eq!(all[0]["amount"], 2500000);
@@ -114,19 +133,41 @@ fn create_list_and_patch() {
     assert_eq!(all[0]["memo"], Value::Null);
     assert_eq!(all[0]["approved"], true);
     assert_eq!(all[0]["cleared"], "cleared");
-    assert_eq!(&ids[1..], &[sid.as_str(), again["id"].as_str().unwrap(), pay["id"].as_str().unwrap()]);
+    assert_eq!(
+        &ids[1..],
+        &[
+            sid.as_str(),
+            again["id"].as_str().unwrap(),
+            pay["id"].as_str().unwrap()
+        ]
+    );
 
     let filtered = expect(
-        get(&f.s, &format!("{}?account_id={c}&since_date=2026-10-02&until_date=2026-10-10&approved=true", f.txns())),
+        get(
+            &f.s,
+            &format!(
+                "{}?account_id={c}&since_date=2026-10-02&until_date=2026-10-10&approved=true",
+                f.txns()
+            ),
+        ),
         200,
     );
     assert_eq!(filtered.as_array().unwrap().len(), 2);
     assert_eq!(filtered[0], shop);
-    err(&get(&f.s, &format!("{}?since_date=2026-02-30", f.txns())), 400);
+    err(
+        &get(&f.s, &format!("{}?since_date=2026-02-30", f.txns())),
+        400,
+    );
     err(&get(&f.s, &format!("{}?approved=yes", f.txns())), 400);
-    assert_eq!(expect(get(&f.s, &format!("{}?payee_id=nope", f.txns())), 200), json!([]));
+    assert_eq!(
+        expect(get(&f.s, &format!("{}?payee_id=nope", f.txns())), 200),
+        json!([])
+    );
 
-    let patched = expect(f.patch(&sid, r#"{"cleared": "cleared", "flag_color": "green"}"#), 200);
+    let patched = expect(
+        f.patch(&sid, r#"{"cleared": "cleared", "flag_color": "green"}"#),
+        200,
+    );
     assert_eq!(patched["cleared"], "cleared");
     assert_eq!(patched["flag_color"], "green");
     assert_eq!(patched["category_id"], g.as_str());
@@ -139,9 +180,19 @@ fn create_list_and_patch() {
     assert_eq!(acct["uncleared_balance"], 1800000 - 1000);
 
     // Payee in use (SPEC 6.4), account with transactions (5.8, 5.9).
-    err(&delete(&f.s, &format!("/plans/{}/payees/{payee}", f.p)), 409);
+    err(
+        &delete(&f.s, &format!("/plans/{}/payees/{payee}", f.p)),
+        409,
+    );
     err(&delete(&f.s, &format!("/plans/{}/accounts/{c}", f.p)), 409);
-    err(&patch(&f.s, &format!("/plans/{}/accounts/{c}", f.p), r#"{"closed": true}"#), 409);
+    err(
+        &patch(
+            &f.s,
+            &format!("/plans/{}/accounts/{c}", f.p),
+            r#"{"closed": true}"#,
+        ),
+        409,
+    );
 
     assert_eq!(delete(&f.s, &f.txn(&sid)).status, 204);
     err(&get(&f.s, &f.txn(&sid)), 404);
@@ -152,10 +203,19 @@ fn validation() {
     let f = setup();
     let (c, a, g) = (&f.checking, &f.asset, &f.groceries);
     let bad = |body: String| err(&post(&f.s, &f.txns(), &body), 400);
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1}}"#)); // no category
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1, "category_id": "{}"}}"#, f.visa_payment));
-    bad(format!(r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": -1, "category_id": "{g}"}}"#));
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1.0, "category_id": "{g}"}}"#));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1}}"#
+    )); // no category
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1, "category_id": "{}"}}"#,
+        f.visa_payment
+    ));
+    bad(format!(
+        r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": -1, "category_id": "{g}"}}"#
+    ));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1.0, "category_id": "{g}"}}"#
+    ));
     bad(format!(
         r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "category_id": "{g}", "flag_color": "pink"}}"#
     ));
@@ -170,19 +230,40 @@ fn validation() {
     ));
     bad(r#"{"account_id": "nope", "date": "2026-10-04", "amount": 1, "category_id": "ready_to_assign"}"#.into());
     // A failed request creates no payee (SPEC 3.11).
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "payee_name": "Ghost"}}"#));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "payee_name": "Ghost"}}"#
+    ));
     let payees = expect(get(&f.s, &format!("/plans/{}/payees", f.p)), 200);
-    assert!(payees.as_array().unwrap().iter().all(|p| p["name"] != "Ghost"));
+    assert!(
+        payees
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["name"] != "Ghost")
+    );
 
     // Tracking accounts take no category; cash defaults to cleared.
-    let t = f.create(&format!(r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": 5}}"#));
+    let t = f.create(&format!(
+        r#"{{"account_id": "{a}", "date": "2026-10-04", "amount": 5}}"#
+    ));
     assert_eq!(t["category_id"], Value::Null);
-    let wallet = id(&account(&f.s, &f.p, r#"{"name": "Wallet", "type": "cash"}"#));
-    let t =
-        f.create(&format!(r#"{{"account_id": "{wallet}", "date": "2026-10-04", "amount": 5, "category_id": "{g}"}}"#));
+    let wallet = id(&account(
+        &f.s,
+        &f.p,
+        r#"{"name": "Wallet", "type": "cash"}"#,
+    ));
+    let t = f.create(&format!(
+        r#"{{"account_id": "{wallet}", "date": "2026-10-04", "amount": 5, "category_id": "{g}"}}"#
+    ));
     assert_eq!(t["cleared"], "cleared");
-    err(&f.patch(&id(&t), &format!(r#"{{"account_id": "{c}"}}"#)), 400);
-    expect(f.patch(&id(&t), &format!(r#"{{"account_id": "{wallet}"}}"#)), 200);
+    err(
+        &f.patch(&id(&t), &format!(r#"{{"account_id": "{c}"}}"#)),
+        400,
+    );
+    expect(
+        f.patch(&id(&t), &format!(r#"{{"account_id": "{wallet}"}}"#)),
+        200,
+    );
 }
 
 #[test]
@@ -206,14 +287,23 @@ fn transfers() {
     );
     // Self-transfer, category on an on-budget transfer, split transfer.
     let bad = |body: String| err(&post(&f.s, &f.txns(), &body), 400);
-    bad(format!(r#"{{"account_id": "{c}", "date": "2026-10-05", "amount": 1, "payee_id": "{}"}}"#, f.checking_payee));
+    bad(format!(
+        r#"{{"account_id": "{c}", "date": "2026-10-05", "amount": 1, "payee_id": "{}"}}"#,
+        f.checking_payee
+    ));
     bad(format!(
         r#"{{"account_id": "{c}", "date": "2026-10-05", "amount": 1, "payee_id": "{}", "category_id": "ready_to_assign"}}"#,
         f.savings_payee
     ));
 
     // Date and amount follow; memo doesn't.
-    expect(f.patch(&in_id, r#"{"amount": 7000, "date": "2026-10-09", "memo": "m"}"#), 200);
+    expect(
+        f.patch(
+            &in_id,
+            r#"{"amount": 7000, "date": "2026-10-09", "memo": "m"}"#,
+        ),
+        200,
+    );
     let o = f.get(&out_id);
     assert_eq!(
         (o["amount"].clone(), o["date"].clone(), o["memo"].clone()),
@@ -223,12 +313,21 @@ fn transfers() {
     // Changing to an ordinary payee needs a category, and deletes the other half.
     err(&f.patch(&out_id, r#"{"payee_name": "Bank"}"#), 400);
     assert_eq!(f.get(&in_id)["amount"], 7000);
-    let o = expect(f.patch(&out_id, r#"{"payee_name": "Bank", "category_id": "ready_to_assign"}"#), 200);
+    let o = expect(
+        f.patch(
+            &out_id,
+            r#"{"payee_name": "Bank", "category_id": "ready_to_assign"}"#,
+        ),
+        200,
+    );
     assert_eq!(o["transfer_transaction_id"], Value::Null);
     err(&get(&f.s, &f.txn(&in_id)), 404);
 
     // Ordinary to transfer into a tracking account: on-budget half keeps its category.
-    let o = expect(f.patch(&out_id, &format!(r#"{{"payee_id": "{}"}}"#, f.asset_payee)), 200);
+    let o = expect(
+        f.patch(&out_id, &format!(r#"{{"payee_id": "{}"}}"#, f.asset_payee)),
+        200,
+    );
     assert_eq!(o["category_id"], "ready_to_assign");
     let half = o["transfer_transaction_id"].as_str().unwrap().to_string();
     let h = f.get(&half);
@@ -278,10 +377,21 @@ fn splits() {
 
     err(&f.patch(&sid, r#"{"amount": -1}"#), 400);
     err(&f.patch(&sid, r#"{"subtransactions": []}"#), 400);
-    let t = expect(f.patch(&sid, &format!(r#"{{"subtransactions": [], "category_id": "{g}"}}"#)), 200);
+    let t = expect(
+        f.patch(
+            &sid,
+            &format!(r#"{{"subtransactions": [], "category_id": "{g}"}}"#),
+        ),
+        200,
+    );
     assert_eq!(t["subtransactions"], json!([]));
     assert_eq!(t["category_id"], g.as_str());
-    let t =
-        expect(f.patch(&sid, &format!(r#"{{"subtransactions": [{{"amount": -90000, "category_id": "{h}"}}]}}"#)), 200);
+    let t = expect(
+        f.patch(
+            &sid,
+            &format!(r#"{{"subtransactions": [{{"amount": -90000, "category_id": "{h}"}}]}}"#),
+        ),
+        200,
+    );
     assert_eq!(t["category_id"], Value::Null);
 }

@@ -104,7 +104,12 @@ impl<'a> Budget<'a> {
             .categories
             .values()
             .filter(|c| c.payment_account_id.is_none())
-            .map(|c| (c.id.as_str(), with_assigned(plan, &c.id, |r: &mut Raw| &mut r.assigned)))
+            .map(|c| {
+                (
+                    c.id.as_str(),
+                    with_assigned(plan, &c.id, |r: &mut Raw| &mut r.assigned),
+                )
+            })
             .collect();
 
         // Payment categories' activity, by account index and month.
@@ -115,7 +120,10 @@ impl<'a> Budget<'a> {
         for t in plan.transactions.values() {
             // Accounts are numbered by creation order, the order credit
             // funding follows.
-            let (ai, _, account) = plan.accounts.get_full(&t.account_id).expect("a transaction's account exists");
+            let (ai, _, account) = plan
+                .accounts
+                .get_full(&t.account_id)
+                .expect("a transaction's account exists");
             let kind = account.kind;
             // Lines (SPEC 11.1): tracking accounts never affect the plan.
             if !kind.on_budget() {
@@ -126,10 +134,19 @@ impl<'a> Budget<'a> {
             // half decides what happens (SPEC 12.5).
             if kind.is_credit()
                 && let Some(other) = &t.transfer_account_id
-                && plan.accounts.get(other).expect("a transfer's other account exists").kind.is_cash()
+                && plan
+                    .accounts
+                    .get(other)
+                    .expect("a transfer's other account exists")
+                    .kind
+                    .is_cash()
             {
                 if t.amount > 0 {
-                    *payment_activity.entry(ai).or_default().entry(month).or_insert(0) -= t.amount;
+                    *payment_activity
+                        .entry(ai)
+                        .or_default()
+                        .entry(month)
+                        .or_insert(0) -= t.amount;
                 } else {
                     *cash_advances.entry(month).or_insert(0) -= t.amount;
                 }
@@ -178,11 +195,19 @@ impl<'a> Budget<'a> {
                     left -= take;
                     let delta = take - net.max(0);
                     if delta != 0 {
-                        *payment_activity.entry(ai).or_default().entry(m).or_insert(0) += delta;
+                        *payment_activity
+                            .entry(ai)
+                            .or_default()
+                            .entry(m)
+                            .or_insert(0) += delta;
                     }
                 }
                 let activity = r.cash + r.credit.values().sum::<i64>();
-                let cell = Cell { assigned: r.assigned, activity, credit_overspending: spending - funded };
+                let cell = Cell {
+                    assigned: r.assigned,
+                    activity,
+                    credit_overspending: spending - funded,
+                };
                 available = cell.available(available);
                 out.insert(m, cell);
             }
@@ -195,14 +220,22 @@ impl<'a> Budget<'a> {
                 continue;
             };
             let mut map = with_assigned(plan, &c.id, |cell: &mut Cell| &mut cell.assigned);
-            let ai = plan.accounts.get_index_of(account_id).expect("a payment category's account exists");
+            let ai = plan
+                .accounts
+                .get_index_of(account_id)
+                .expect("a payment category's account exists");
             for (&m, &a) in payment_activity.get(&ai).into_iter().flatten() {
                 map.entry(m).or_default().activity += a;
             }
             cells.insert(c.id.as_str(), map);
         }
 
-        Self { plan, cells, income, cash_advances }
+        Self {
+            plan,
+            cells,
+            income,
+            cash_advances,
+        }
     }
 
     /// A category's entry for `month` (SPEC 11.3 to 11.5, 12.1 to 12.3).
@@ -210,8 +243,14 @@ impl<'a> Budget<'a> {
         let cells = self.cells.get(category_id);
         // Months without figures between those with them just carry
         // `available` over (SPEC 11.4).
-        let before = cells.into_iter().flat_map(|c| c.range(..month)).fold(0, |a, (_, cell)| cell.available(a));
-        let cell = cells.and_then(|c| c.get(&month)).copied().unwrap_or_default();
+        let before = cells
+            .into_iter()
+            .flat_map(|c| c.range(..month))
+            .fold(0, |a, (_, cell)| cell.available(a));
+        let cell = cells
+            .and_then(|c| c.get(&month))
+            .copied()
+            .unwrap_or_default();
         let available = cell.available(before);
         Entry {
             category_id: category_id.to_owned(),
@@ -258,7 +297,12 @@ impl<'a> Budget<'a> {
         let mut assigned = 0i64;
         let mut activity = 0i64;
         let mut categories = Vec::new();
-        for c in self.plan.groups.keys().flat_map(|g| self.plan.group_categories(g)) {
+        for c in self
+            .plan
+            .groups
+            .keys()
+            .flat_map(|g| self.plan.group_categories(g))
+        {
             let e = self.entry(&c.id, month);
             assigned += e.assigned;
             if c.payment_account_id.is_none() {
@@ -272,7 +316,10 @@ impl<'a> Budget<'a> {
         let last_month = month.prev();
         let cash_overspending_last_month = overspending.get(&last_month).copied().unwrap_or(0);
         let left_over_from_last_month = net.range(..month).map(|(_, n)| n).sum::<i64>()
-            - overspending.range(..last_month).map(|(_, o)| o).sum::<i64>();
+            - overspending
+                .range(..last_month)
+                .map(|(_, o)| o)
+                .sum::<i64>();
         let net_m = net.get(&month).copied().unwrap_or(0);
         let pool = left_over_from_last_month + net_m - cash_overspending_last_month;
 

@@ -28,7 +28,11 @@ const MAX_DEPTH: usize = 128;
 /// too large for a 64-bit float (SPEC 3.13).
 pub fn parse(bytes: &[u8]) -> Result<Json, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "the body isn't valid UTF-8".to_string())?;
-    let mut p = Parser { text, bytes: text.as_bytes(), pos: 0 };
+    let mut p = Parser {
+        text,
+        bytes: text.as_bytes(),
+        pos: 0,
+    };
     p.skip_ws();
     let value = p.value(0)?;
     p.skip_ws();
@@ -213,7 +217,8 @@ impl Parser<'_> {
                         char::from_u32(scalar).expect("a surrogate pair is a scalar value")
                     }
                     0xDC00..=0xDFFF => return Err(self.error("lone surrogate in string")),
-                    _ => char::from_u32(unit).expect("a non-surrogate BMP code point is a scalar value"),
+                    _ => char::from_u32(unit)
+                        .expect("a non-surrogate BMP code point is a scalar value"),
                 }
             }
             _ => return Err(self.error("invalid escape")),
@@ -280,12 +285,22 @@ mod tests {
         assert_eq!(ok(" null "), Json::Null);
         assert_eq!(ok("-0"), Json::Number("-0".into()));
         assert_eq!(ok("1.5e3"), Json::Number("1.5e3".into()));
-        assert_eq!(ok(r#""a\u00e9\ud83d\ude00\n\/""#), Json::String("aé😀\n/".into()));
+        assert_eq!(
+            ok(r#""a\u00e9\ud83d\ude00\n\/""#),
+            Json::String("aé😀\n/".into())
+        );
         assert_eq!(
             ok("[1, [], {}]"),
-            Json::Array(vec![Json::Number("1".into()), Json::Array(vec![]), Json::Object(Object::new())])
+            Json::Array(vec![
+                Json::Number("1".into()),
+                Json::Array(vec![]),
+                Json::Object(Object::new())
+            ])
         );
-        let Json::Object(o) = ok(r#"{"a": 1, "a": 2, "$serde_json::private::RawValue": "x"}"#) else { panic!() };
+        let Json::Object(o) = ok(r#"{"a": 1, "a": 2, "$serde_json::private::RawValue": "x"}"#)
+        else {
+            panic!()
+        };
         assert_eq!(o["a"], Json::Number("2".into()));
         ok(&format!("{}{}", "[".repeat(128), "]".repeat(128)));
     }

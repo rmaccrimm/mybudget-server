@@ -35,12 +35,20 @@ pub fn start_on(dir: &std::path::Path) -> Server {
 /// its environment or stdin.
 pub fn start_with(configure: impl FnOnce(&mut Command)) -> Server {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mybudget-server"));
-    command.env("MYBUDGET_ADDR", "127.0.0.1:0").stdout(Stdio::piped());
+    command
+        .env("MYBUDGET_ADDR", "127.0.0.1:0")
+        .stdout(Stdio::piped());
     configure(&mut command);
     let mut child = command.spawn().unwrap();
     let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
-    let addr = line.trim().strip_prefix("listening on ").unwrap().to_string();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap()
+        .to_string();
     Server { child, addr }
 }
 
@@ -52,7 +60,13 @@ pub struct Resp {
 
 impl Resp {
     pub fn json(&self) -> Value {
-        assert!(self.headers.to_ascii_lowercase().contains("content-type: application/json"), "{}", self.headers);
+        assert!(
+            self.headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{}",
+            self.headers
+        );
         serde_json::from_str(&self.body).unwrap()
     }
 }
@@ -71,7 +85,11 @@ pub fn req(s: &Server, method: &str, path: &str, body: Option<&[u8]>) -> Resp {
     let raw = String::from_utf8(raw).unwrap();
     let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
     let status = headers[9..12].parse().unwrap();
-    Resp { status, headers: headers.to_string(), body: body.to_string() }
+    Resp {
+        status,
+        headers: headers.to_string(),
+        body: body.to_string(),
+    }
 }
 
 pub fn err(r: &Resp, status: u16) {
