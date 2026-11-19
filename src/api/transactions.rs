@@ -617,7 +617,7 @@ pub async fn list(
                     "true" => true,
                     "false" => false,
                     _ => return Err(ApiError::bad_request("approved must be true or false")),
-                })
+                });
             }
             _ => {}
         }

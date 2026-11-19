@@ -1,9 +1,9 @@
 //! Plan files in the data directory (SPEC 15).
 //!
-//! Each plan is kept in a SQLite file of its own. A connection is opened for
+//! Each plan is kept in a `SQLite` file of its own. A connection is opened for
 //! each save and closed after it, so nothing holds a file open between
 //! requests, a file can be renamed or deleted at any time, and each save sees
-//! the file as it is on disk. Plan files use SQLite's rollback journal, which
+//! the file as it is on disk. Plan files use `SQLite`'s rollback journal, which
 //! is deleted when a transaction ends, so none is left beside a file between
 //! requests (SPEC 15.6). A file that comes with journal files beside it, or in
 //! WAL mode, is put right when the server starts ([`prepare`]).
@@ -90,10 +90,10 @@ fn upgrade(path: &Path) -> Result<(), Failure> {
 /// journal files beside it (SPEC 15.6).
 ///
 /// Leaving WAL mode moves what the WAL holds into the file and deletes the
-/// WAL and its index. Any journal file still there is one SQLite ignores: a
+/// WAL and its index. Any journal file still there is one `SQLite` ignores: a
 /// rollback journal that holds no transaction, as `journal_mode = PERSIST`
 /// or `TRUNCATE` leave behind, an empty WAL, or a WAL index without a WAL.
-/// SQLite rolled back any journal that did hold one when the file was read,
+/// `SQLite` rolled back any journal that did hold one when the file was read,
 /// so what's left holds nothing the file needs, and is deleted.
 fn prepare(path: &Path) -> Result<(), Failure> {
     upgrade(path)?;
@@ -114,7 +114,7 @@ fn prepare(path: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Writes the changes from `old` to `new` in one SQLite transaction, so the
+/// Writes the changes from `old` to `new` in one `SQLite` transaction, so the
 /// file gets all of them or none (SPEC 15.10).
 fn write_file(path: &Path, old: Option<&Plan>, new: &Plan) -> Result<(), Failure> {
     let mut conn = connect(path)?;

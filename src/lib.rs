@@ -1,4 +1,4 @@
-//! MyBudget HTTP API.
+//! `MyBudget` HTTP API.
 //!
 //! axum answers the first two errors of SPEC 3.4 itself: a path that isn't
 //! routed gets the JSON 404 from the fallback, and a routed path with

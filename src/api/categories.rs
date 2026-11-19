@@ -241,7 +241,7 @@ pub async fn delete(
         return Err(ApiError::conflict("category is in use"));
     }
     store.change_plan(&plan_id, |plan| {
-        plan.delete_category(&category_id, reassign_to.as_deref())
+        plan.delete_category(&category_id, reassign_to.as_deref());
     })?;
     Ok(StatusCode::NO_CONTENT)
 }

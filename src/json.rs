@@ -1,6 +1,6 @@
 //! A strict JSON parser (RFC 8259) for request bodies.
 //!
-//! serde_json can't be used for requests: once parsed, it can't tell `1` from
+//! `serde_json` can't be used for requests: once parsed, it can't tell `1` from
 //! `1.0` or `-0` from `-0.0` (SPEC 3.7 needs numbers as written), and with
 //! the `raw_value` feature axum turns on, it treats some object keys
 //! specially, while SPEC 3.13 lets an ignored field hold any JSON value.
