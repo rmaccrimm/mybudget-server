@@ -53,9 +53,9 @@ async fn serve(store: Store) -> std::io::Result<()> {
 /// end of its stdin pipe, so end of file there means the parent has gone and
 /// the server must exit with status 0. Whatever is read before then is
 /// discarded. A blocking thread is the simplest way to wait on stdin; the
-/// process exits outright, once no request is saving a change, rather than
-/// shutting down gracefully, since an open connection could otherwise keep it
-/// alive past the one-second limit.
+/// process exits outright ([`AppState::exit`]) rather than shutting down
+/// gracefully, since an open connection could otherwise keep it alive past
+/// the one-second limit.
 ///
 /// `std::io::copy` won't do here: the parent may hand over a non-blocking pipe
 /// or socket, where a read with nothing waiting fails with `WouldBlock`, and

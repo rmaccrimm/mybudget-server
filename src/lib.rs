@@ -15,7 +15,8 @@
 )]
 
 use std::io::Write;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
@@ -50,6 +51,10 @@ fn log(line: std::fmt::Arguments) {
     let _ = writeln!(std::io::stderr(), "{line}");
 }
 
+/// How long [`AppState::exit`] waits for a request to finish with the store,
+/// well inside SPEC 1.4's one second.
+const EXIT_PATIENCE: Duration = Duration::from_millis(500);
+
 /// The state handlers share: the store, behind one lock.
 #[derive(Clone)]
 pub struct AppState(Arc<Mutex<Store>>);
@@ -70,10 +75,23 @@ impl AppState {
     }
 
     /// Exits the process with status 0 once no request holds the store, so
-    /// that exiting never cuts a save short (SPEC 1.4, 15.5).
+    /// that exiting doesn't cut a save short and leave a journal beside its
+    /// file (SPEC 15.6), but within [`EXIT_PATIENCE`] even if a request still
+    /// holds it, since the server must exit within a second (SPEC 1.4). A
+    /// save cut short is no worse than the `SIGKILL` that SPEC 15.5 already
+    /// covers: its request got no response, and `SQLite` rolls its
+    /// transaction back the next time the file is opened.
     pub fn exit(&self) -> ! {
+        let deadline = Instant::now() + EXIT_PATIENCE;
         // Held until the process ends; a poisoned lock is held all the same.
-        let _store = self.0.lock();
+        let _store = loop {
+            match self.0.try_lock() {
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                held => break held,
+            }
+        };
         std::process::exit(0)
     }
 }
