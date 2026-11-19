@@ -1,14 +1,16 @@
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::os::fd::AsFd;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
 use mybudget_server::{AppState, Store};
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::io::Errno;
+
+/// How much of stdin each read takes, to discard it (SPEC 1.4).
+const STDIN_CHUNK: usize = 4096;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -45,9 +47,14 @@ fn run() -> Result<(), String> {
     if exit_on_eof && stdin_eof_is_waiting() {
         state.exit();
     }
-    // The test harness reads this line to find the port (SPEC 1.3).
+    // The test harness reads this line to find the port (SPEC 1.3). It goes
+    // out in one write, since the watch exiting meanwhile leaves stdout
+    // unbuffered, and `println!` would then write it piece by piece.
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    println!("listening on {addr}");
+    let line = format!("listening on {addr}\n");
+    std::io::stdout()
+        .write_all(line.as_bytes())
+        .map_err(|e| e.to_string())?;
     serve(listener, state).map_err(|e| e.to_string())
 }
 
@@ -97,7 +104,7 @@ fn exit_on_stdin_eof(ready: Arc<OnceLock<AppState>>) {
     const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
-        let mut discard = [0; 4096];
+        let mut discard = [0; STDIN_CHUNK];
         loop {
             match stdin.read(&mut discard) {
                 Ok(0) => break,
@@ -117,50 +124,40 @@ fn exit_on_stdin_eof(ready: Arc<OnceLock<AppState>>) {
 }
 
 /// Whether stdin's end of file is already there, read yet or not, so that the
-/// server mustn't print 1.3's line (SPEC 1.4). It never waits, so the answer
-/// doesn't hang on how the watch's thread is scheduled, and a quiet or busy
-/// stdin doesn't hold startup up.
+/// server mustn't print 1.3's line (SPEC 1.4). The main thread asks this
+/// itself, so the answer doesn't hang on how the watch's thread is scheduled.
 ///
-/// `poll` answers for a pipe or socket: `POLLHUP` says its other end is
-/// closed, so end of file is next once what's waiting is read; without it,
-/// whatever is or isn't waiting, more may come. It can't answer for a regular
-/// file, which it always calls readable, or for a device it can't watch, such
-/// as `/dev/null` (`POLLNVAL`). A read there returns at once, so one read
-/// answers; what it takes is ignored, like all that stdin brings. If `poll`
-/// or that read fails, the watch decides.
+/// Only reading stdin answers for every kind of stdin: macOS's `poll` reports
+/// nothing for a named pipe whose writer has closed, and nothing at all about
+/// a device such as `/dev/null`. The reads mustn't wait, though, since a quiet
+/// pipe or socket mustn't hold startup up, so stdin is non-blocking while this
+/// reads it and is then put back as it was. If the watch reads meanwhile, it
+/// gets `WouldBlock` and retries, as on any non-blocking stdin. What the reads
+/// take is ignored, like all that stdin brings. They stop at end of file, when
+/// nothing more is waiting, or once they have taken more than a pipe holds,
+/// since a writer is then still sending, so end of file wasn't already there.
+/// If stdin's flags can't be changed or a read fails, the watch decides.
 fn stdin_eof_is_waiting() -> bool {
-    // A handle of our own, since the watch keeps `Stdin`'s lock.
-    let Ok(stdin) = std::io::stdin()
-        .as_fd()
-        .try_clone_to_owned()
-        .map(File::from)
-    else {
+    // A pipe holds 64 KiB on macOS, and at most 1 MiB on Linux by default.
+    const MORE_THAN_A_PIPE_HOLDS: usize = 1 << 20;
+    let stdin = std::io::stdin();
+    let Ok(flags) = fcntl_getfl(&stdin) else {
         return false;
     };
-    let now = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let revents = loop {
-        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
-        match poll(&mut fds, Some(&now)) {
-            Ok(_) => break fds[0].revents(),
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return false,
-        }
-    };
-    if revents.contains(PollFlags::HUP) {
-        return true;
-    }
-    let is_file = stdin.metadata().is_ok_and(|m| m.is_file());
-    if !is_file && !revents.contains(PollFlags::NVAL) {
+    if fcntl_setfl(&stdin, flags | OFlags::NONBLOCK).is_err() {
         return false;
     }
-    loop {
-        match (&stdin).read(&mut [0; 4096]) {
-            Ok(n) => return n == 0,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return false,
+    let mut taken = 0;
+    let eof = loop {
+        match rustix::io::read(&stdin, &mut [0; STDIN_CHUNK]) {
+            Ok(0) => break true,
+            Ok(n) if taken + n <= MORE_THAN_A_PIPE_HOLDS => taken += n,
+            Err(Errno::INTR) => {}
+            // More than a pipe holds, nothing waiting, or a failed read.
+            Ok(_) | Err(_) => break false,
         }
-    }
+    };
+    // Should this fail, stdin stays non-blocking, which the watch copes with.
+    let _ = fcntl_setfl(&stdin, flags);
+    eof
 }

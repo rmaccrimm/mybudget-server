@@ -1,16 +1,28 @@
 //! SPEC 1.4: exiting when stdin reaches end of file.
 mod common;
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use common::*;
+use rustix::fs::{Mode, OFlags, open};
+
+/// Held by each test here, so that they run one at a time. macOS has no
+/// `pipe2`, so std makes a pipe close-on-exec only after making it, and a
+/// server that another test starts in between gets a copy of its write end,
+/// which keeps this test's server from end of file until that one exits.
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn start_piped(flag: Option<&str>) -> Server {
     start_with(|c| {
@@ -36,6 +48,7 @@ fn exit_within(s: &mut Server, limit: Duration) -> Option<ExitStatus> {
 
 #[test]
 fn exits_with_status_0_when_stdin_closes() {
+    let _serial = one_at_a_time();
     let mut s = start_piped(Some("1"));
     let mut stdin = s.child.stdin.take().unwrap();
     stdin.write_all(b"anything\nignored\n").unwrap();
@@ -48,6 +61,7 @@ fn exits_with_status_0_when_stdin_closes() {
 
 #[test]
 fn exits_with_an_open_connection() {
+    let _serial = one_at_a_time();
     let mut s = start_piped(Some("1"));
     let _idle = std::net::TcpStream::connect(&s.addr).unwrap();
     drop(s.child.stdin.take());
@@ -57,6 +71,7 @@ fn exits_with_an_open_connection() {
 
 #[test]
 fn keeps_running_without_the_flag() {
+    let _serial = one_at_a_time();
     for flag in [None, Some("0"), Some("true"), Some("")] {
         let mut s = start_piped(flag);
         drop(s.child.stdin.take());
@@ -70,6 +85,7 @@ fn keeps_running_without_the_flag() {
 
 #[test]
 fn keeps_running_with_stdin_null_and_no_flag() {
+    let _serial = one_at_a_time();
     let mut s = start_with(|c| {
         c.stdin(Stdio::null())
             .env_remove("MYBUDGET_EXIT_ON_STDIN_EOF");
@@ -80,6 +96,7 @@ fn keeps_running_with_stdin_null_and_no_flag() {
 
 #[test]
 fn exits_while_still_loading_its_data() {
+    let _serial = one_at_a_time();
     let dir = tempfile::tempdir().unwrap();
     new_plan(&start_on(dir.path()));
     // Copies of one plan are all read, and all skipped (SPEC 15.7), so
@@ -110,17 +127,47 @@ fn exits_without_listening(stdin: impl Into<Stdio>) {
         .env_remove("MYBUDGET_DATA")
         .env("MYBUDGET_EXIT_ON_STDIN_EOF", "1")
         .stdin(stdin)
-        .stderr(Stdio::null())
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", output.status);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{}: {stderr}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{stderr}");
+}
+
+/// Makes a new named pipe in `dir`, which macOS's `poll` never reports at end
+/// of file.
+fn new_named_pipe(dir: &Path) -> PathBuf {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let path = dir.join(format!("fifo {}", COUNT.fetch_add(1, Ordering::Relaxed)));
+    // rustix has no `mkfifoat` on macOS.
+    let made = std::process::Command::new("mkfifo").arg(&path).status();
+    assert!(made.unwrap().success());
+    path
+}
+
+/// A new named pipe's blocking read end and its write end.
+fn named_pipe(dir: &Path) -> (File, File) {
+    let path = new_named_pipe(dir);
+    // Opening one end waits for the other.
+    let reader = std::thread::spawn({
+        let path = path.clone();
+        move || File::open(path).unwrap()
+    });
+    let writer = OpenOptions::new().write(true).open(&path).unwrap();
+    (reader.join().unwrap(), writer)
+}
+
+/// The read end of a new named pipe that no writer has opened.
+fn named_pipe_never_written(dir: &Path) -> OwnedFd {
+    let path = new_named_pipe(dir);
+    open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap()
 }
 
 /// End of file there from the start always wins over printing the line, even
 /// with every core busy, so the server's threads run late.
 #[test]
 fn never_listens_when_stdin_starts_at_eof() {
+    let _serial = one_at_a_time();
     let stop = Arc::new(AtomicBool::new(false));
     let spinners: Vec<_> = (0..std::thread::available_parallelism().map_or(4, usize::from))
         .map(|_| {
@@ -148,6 +195,14 @@ fn never_listens_when_stdin_starts_at_eof() {
         writer.write_all(b"ignored\n").unwrap();
         drop(writer);
         exits_without_listening(reader);
+        let (reader, writer) = named_pipe(dir.path());
+        drop(writer);
+        exits_without_listening(reader);
+        let (reader, mut writer) = named_pipe(dir.path());
+        writer.write_all(b"ignored\n").unwrap();
+        drop(writer);
+        exits_without_listening(reader);
+        exits_without_listening(named_pipe_never_written(dir.path()));
     }
     stop.store(true, Ordering::Relaxed);
     for spinner in spinners {
@@ -192,6 +247,7 @@ fn start_promptly(stdin: impl Into<Stdio> + Send + 'static) -> Server {
 /// A device that never runs dry is never at end of file.
 #[test]
 fn starts_while_stdin_is_endless_device() {
+    let _serial = one_at_a_time();
     let mut s = start_promptly(std::fs::File::open("/dev/zero").unwrap());
     sleep(Duration::from_millis(300));
     assert!(s.child.try_wait().unwrap().is_none());
@@ -202,6 +258,7 @@ fn starts_while_stdin_is_endless_device() {
 /// delays startup nor ends the server.
 #[test]
 fn starts_while_stdin_never_stops() {
+    let _serial = one_at_a_time();
     let (reader, mut writer) = std::io::pipe().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let feeder = {
@@ -224,6 +281,7 @@ fn starts_while_stdin_never_stops() {
 
 #[test]
 fn keeps_running_on_a_quiet_non_blocking_pipe() {
+    let _serial = one_at_a_time();
     let (reader, writer) = std::io::pipe().unwrap();
     // std can't make a pipe non-blocking; tokio's pipe receiver sets
     // O_NONBLOCK and hands the descriptor back with it still set.
@@ -240,7 +298,16 @@ fn keeps_running_on_a_quiet_non_blocking_pipe() {
 }
 
 #[test]
+fn keeps_running_on_a_quiet_named_pipe() {
+    let _serial = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    let (reader, writer) = named_pipe(dir.path());
+    keeps_running_until_eof(reader.into(), writer);
+}
+
+#[test]
 fn keeps_running_on_a_quiet_non_blocking_socket() {
+    let _serial = one_at_a_time();
     let (ours, theirs) = UnixStream::pair().unwrap();
     theirs.set_nonblocking(true).unwrap();
     keeps_running_until_eof(theirs.into(), ours);
