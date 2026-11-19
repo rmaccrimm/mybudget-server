@@ -157,10 +157,21 @@ fn named_pipe(dir: &Path) -> (File, File) {
     (reader.join().unwrap(), writer)
 }
 
-/// The read end of a new named pipe that no writer has opened.
-fn named_pipe_never_written(dir: &Path) -> OwnedFd {
+/// The non-blocking read end of a new named pipe, which opens without waiting
+/// for a writer, and the pipe's path.
+fn non_blocking_named_pipe(dir: &Path) -> (OwnedFd, PathBuf) {
     let path = new_named_pipe(dir);
-    open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap()
+    let reader = open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap();
+    (reader, path)
+}
+
+/// The non-blocking read end of a new named pipe whose writer wrote `input`
+/// and closed.
+fn named_pipe_written_and_closed(dir: &Path, input: &[u8]) -> OwnedFd {
+    let (reader, path) = non_blocking_named_pipe(dir);
+    let mut writer = OpenOptions::new().write(true).open(path).unwrap();
+    writer.write_all(input).unwrap();
+    reader
 }
 
 /// End of file there from the start always wins over printing the line, even
@@ -202,7 +213,9 @@ fn never_listens_when_stdin_starts_at_eof() {
         writer.write_all(b"ignored\n").unwrap();
         drop(writer);
         exits_without_listening(reader);
-        exits_without_listening(named_pipe_never_written(dir.path()));
+        exits_without_listening(non_blocking_named_pipe(dir.path()).0);
+        exits_without_listening(named_pipe_written_and_closed(dir.path(), b""));
+        exits_without_listening(named_pipe_written_and_closed(dir.path(), b"ignored\n"));
     }
     stop.store(true, Ordering::Relaxed);
     for spinner in spinners {
