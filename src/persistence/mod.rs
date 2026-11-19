@@ -16,12 +16,12 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{M, Migrations};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::{self, File};
-use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::fs;
+use std::io::{self, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::model::{Plan, PlanInfo, new_id};
+use crate::model::{Plan, PlanInfo};
 use names::{file_names, safe_name};
 use records::{read_plan, write_plan};
 
@@ -73,15 +73,41 @@ fn journal(path: &Path, suffix: &str) -> PathBuf {
     journal.into()
 }
 
-/// The start of the name of [`read_plan_file`]'s scratch directories.
-const SCRATCH_PREFIX: &str = ".mybudget-scratch-";
+/// The start of the name of everything the server keeps in a directory only
+/// while it works there: [`read_plan_file`]'s scratch directories,
+/// [`PlanFiles::create`]'s new files, and [`check_writable`]'s probe. These
+/// names never end in `.sqlite`, so none is taken for a plan file
+/// (SPEC 15.5), and anything left by a server killed while working is removed
+/// when a server next starts on the directory.
+const TEMPORARY_PREFIX: &str = ".mybudget-tmp-";
 
-/// Whether `path` is a scratch directory of [`read_plan_file`]'s.
-fn is_scratch(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| {
-        name.as_encoded_bytes()
-            .starts_with(SCRATCH_PREFIX.as_bytes())
-    })
+/// Makes temporary files and directories named with [`TEMPORARY_PREFIX`].
+fn temporary() -> tempfile::Builder<'static, 'static> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(TEMPORARY_PREFIX);
+    builder
+}
+
+/// Removes whatever [`TEMPORARY_PREFIX`] names in `dir`.
+fn remove_temporaries(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .starts_with(TEMPORARY_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        // Best effort: what's left behind is only clutter.
+        let _ = if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+    }
+    Ok(())
 }
 
 /// Reads the plan in a plan file without changing the file or the journal
@@ -95,12 +121,10 @@ fn is_scratch(path: &Path) -> bool {
 /// permission bits ([`fs::copy`]), so `ready` fails on the copy as it would
 /// on a file the server can't write, such as a read-only one in WAL mode.
 ///
-/// The scratch directory goes beside the file, in a directory the server
-/// must be able to write in anyway (SPEC 15.1, 15.9), rather than in the
-/// system's temporary directory, which the server may not be able to write
-/// in. Its name doesn't end in `.sqlite`, so it's never taken for a plan
-/// file (SPEC 15.5), and one left over by a server killed while reading is
-/// removed when a server next starts on the directory.
+/// The scratch directory goes beside the file, since the system's temporary
+/// directory may not be writable for the server. The data directory always
+/// is (SPEC 15.1), but a file being migrated (SPEC 15.9) may be in one that
+/// isn't, and there the system's is the only place left to try.
 fn read_plan_file(path: &Path, ready: fn(&Path) -> Result<(), Failure>) -> Result<Plan, Failure> {
     // Opening anything else, such as a named pipe, could block.
     if !fs::metadata(path)?.is_file() {
@@ -110,9 +134,9 @@ fn read_plan_file(path: &Path, ready: fn(&Path) -> Result<(), Failure>) -> Resul
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let scratch = tempfile::Builder::new()
-        .prefix(SCRATCH_PREFIX)
-        .tempdir_in(dir)?;
+    let scratch = temporary()
+        .tempdir_in(dir)
+        .or_else(|_| temporary().tempdir())?;
     let copy = scratch.path().join("plan.sqlite");
     fs::copy(path, &copy)?;
     for suffix in JOURNALS {
@@ -207,9 +231,9 @@ fn one_line(text: &str) -> String {
 
 /// Checks the server can create, write and delete files in `dir` (SPEC 15.1).
 fn check_writable(dir: &Path) -> io::Result<()> {
-    let probe = dir.join(format!(".mybudget-write-check-{}", new_id()));
-    fs::write(&probe, b"")?;
-    fs::remove_file(&probe)
+    let mut probe = temporary().tempfile_in(dir)?;
+    probe.write_all(b"probe")?;
+    probe.close()
 }
 
 /// The data directory and the file each plan in it is saved in.
@@ -228,14 +252,12 @@ impl PlanFiles {
             |e: io::Error| format!("can't use the data directory {}: {e}", dir.display());
         fs::create_dir_all(dir).map_err(unusable)?;
         check_writable(dir).map_err(unusable)?;
+        remove_temporaries(dir).map_err(unusable)?;
         let mut paths = Vec::new();
         for entry in fs::read_dir(dir).map_err(unusable)? {
             let path = entry.map_err(unusable)?.path();
             if path.as_os_str().as_encoded_bytes().ends_with(b".sqlite") {
                 paths.push(path);
-            } else if is_scratch(&path) {
-                // Left by a server killed while it read a file.
-                let _ = fs::remove_dir_all(&path);
             }
         }
         paths.sort();
@@ -296,14 +318,21 @@ impl PlanFiles {
     }
 
     /// Saves a new plan in a file of its own (SPEC 15.2).
+    ///
+    /// The file is made under a temporary name and only then given its own,
+    /// so a server killed while making it leaves no half-made plan file to
+    /// be skipped, holding the name, at the next start (SPEC 15.5). Giving it
+    /// its name fails rather than overwrite a file that has appeared since.
     pub fn create(&mut self, plan: &Plan) -> Result<(), Failure> {
         let path = self.free_path(&plan.info, None)?;
-        // Fails rather than overwriting a file that has appeared since.
-        File::create_new(&path)?;
-        if let Err(e) = upgrade(&path).and_then(|()| write_file(&path, None, plan)) {
-            let _ = fs::remove_file(&path);
-            return Err(e);
-        }
+        let new = temporary()
+            // As `File::create` would make it.
+            .permissions(fs::Permissions::from_mode(0o666))
+            .tempfile_in(&self.dir)?
+            .into_temp_path();
+        upgrade(&new)?;
+        write_file(&new, None, plan)?;
+        new.persist_noclobber(&path).map_err(|e| e.error)?;
         self.paths.insert(plan.info.id.clone(), path);
         Ok(())
     }

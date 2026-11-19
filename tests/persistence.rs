@@ -857,8 +857,11 @@ fn a_skipped_file_with_a_line_break_in_its_name_is_named_on_one_line() {
 #[test]
 fn files_are_read_without_a_temporary_directory() {
     let dir = data_dir();
-    // A scratch directory left by a server killed while it read a file.
-    fs::create_dir(dir.path().join(".mybudget-scratch-left")).unwrap();
+    // What a server killed while it read a file, or made a new plan's file,
+    // leaves behind.
+    fs::create_dir(dir.path().join(".mybudget-tmp-scratch")).unwrap();
+    fs::write(dir.path().join(".mybudget-tmp-new"), "half made").unwrap();
+    fs::write(dir.path().join(".mybudget-tmp-new-journal"), "").unwrap();
     let s = start_on(dir.path());
     let plan = new_named_plan(&s, "Household");
     drop(s);
@@ -894,4 +897,45 @@ fn a_skipped_file_is_named_as_it_is() {
     fs::write(dir.path().join(name), "not a database").unwrap();
     let (_, stderr) = start_and_read_stderr(dir.path());
     assert!(stderr.contains(name), "{stderr}");
+}
+
+/// A new plan's file is made under a temporary name, then given its own, and
+/// gets the permissions any new file would.
+#[test]
+fn a_new_plan_file_is_an_ordinary_file() {
+    let dir = data_dir();
+    let s = start_on(dir.path());
+    new_named_plan(&s, "Household");
+    assert_eq!(files(dir.path()), ["Household.sqlite"]);
+    let mode = |name: &str| {
+        fs::metadata(dir.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+    };
+    fs::write(dir.path().join("ordinary"), "").unwrap();
+    assert_eq!(mode("Household.sqlite"), mode("ordinary"));
+}
+
+/// Migrating a file to its own version writes nothing, so it works in a
+/// directory nothing can be written in.
+#[test]
+fn migrate_to_its_own_version_works_in_a_read_only_directory() {
+    let dir = data_dir();
+    let data = dir.path().join("data");
+    let s = start_on(&data);
+    new_named_plan(&s, "Household");
+    drop(s);
+    let file = data.join("Household.sqlite");
+    let bytes = fs::read(&file).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = migrate(&file, "1");
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+    assert_eq!(files(&data), ["Household.sqlite"]);
 }
