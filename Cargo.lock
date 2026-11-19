@@ -375,6 +375,7 @@ dependencies = [
  "indexmap",
  "rusqlite",
  "rusqlite_migration",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

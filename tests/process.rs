@@ -5,6 +5,8 @@ use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -98,6 +100,52 @@ fn exits_while_still_loading_its_data() {
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(output.status.success(), "{}", output.status);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// Runs the server with the flag set and `stdin` already at end of file, and
+/// checks that it exits with status 0 without printing 1.3's line.
+fn exits_without_listening(stdin: impl Into<Stdio>) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mybudget-server"))
+        .env("MYBUDGET_ADDR", "127.0.0.1:0")
+        .env_remove("MYBUDGET_DATA")
+        .env("MYBUDGET_EXIT_ON_STDIN_EOF", "1")
+        .stdin(stdin)
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// End of file there from the start always wins over printing the line, even
+/// with every core busy, so the server's threads run late.
+#[test]
+fn never_listens_when_stdin_starts_at_eof() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let spinners: Vec<_> = (0..std::thread::available_parallelism().map_or(4, usize::from))
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect();
+    for _ in 0..30 {
+        exits_without_listening(Stdio::null());
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(writer);
+        exits_without_listening(reader);
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"ignored\n").unwrap();
+        drop(writer);
+        exits_without_listening(reader);
+    }
+    stop.store(true, Ordering::Relaxed);
+    for spinner in spinners {
+        spinner.join().unwrap();
+    }
 }
 
 /// Starts the server with the flag set and `stdin`, a non-blocking pipe or

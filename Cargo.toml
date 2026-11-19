@@ -9,6 +9,7 @@ http-body-util = "0.1"
 indexmap = "2.14.2"
 rusqlite = { version = "0.41", features = ["bundled"] }
 rusqlite_migration = "2.7"
+rustix = { version = "1.1.6", features = ["event"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"
