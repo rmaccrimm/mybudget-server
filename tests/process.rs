@@ -76,6 +76,30 @@ fn keeps_running_with_stdin_null_and_no_flag() {
     assert_eq!(get(&s, "/health").body, "ok");
 }
 
+#[test]
+fn exits_while_still_loading_its_data() {
+    let dir = tempfile::tempdir().unwrap();
+    new_plan(&start_on(dir.path()));
+    // Copies of one plan are all read, and all skipped (SPEC 15.7), so
+    // loading them takes a while.
+    let plan = dir.path().join("Household.sqlite");
+    for i in 0..300 {
+        std::fs::copy(&plan, dir.path().join(format!("copy {i}.sqlite"))).unwrap();
+    }
+    let started = Instant::now();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mybudget-server"))
+        .env("MYBUDGET_ADDR", "127.0.0.1:0")
+        .env("MYBUDGET_DATA", dir.path())
+        .env("MYBUDGET_EXIT_ON_STDIN_EOF", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(output.status.success(), "{}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
 /// Starts the server with the flag set and `stdin`, a non-blocking pipe or
 /// socket end, as its standard input. Checks that it outlives a quiet stretch
 /// and some input, then exits once `other_end` is dropped.
