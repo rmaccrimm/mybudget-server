@@ -6,22 +6,20 @@
 //! the file as it is on disk. Plan files use `SQLite`'s rollback journal, which
 //! is deleted when a transaction ends, so none is left beside a file between
 //! requests (SPEC 15.6). A file that comes with journal files beside it, or in
-//! WAL mode, is put right when the server starts ([`prepare`]).
+//! WAL mode, is read without changing it ([`read_plan_file`]) and put right
+//! only once the server knows it will serve it ([`prepare`]).
 
 mod names;
 mod records;
 
+use rusqlite::{Connection, OpenFlags};
+use rusqlite_migration::{M, Migrations};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use rusqlite::backup::Backup;
-use rusqlite::{Connection, OpenFlags};
-use rusqlite_migration::{M, Migrations};
 
 use crate::model::{Plan, PlanInfo, new_id};
 use names::{file_names, safe_name};
@@ -65,23 +63,41 @@ fn schema_version(conn: &Connection) -> Result<usize, Failure> {
     }
 }
 
-/// Reads the plan in a plan file, without changing the file. A file at an
-/// older version is read from a copy upgraded in memory, so that a file that
-/// can't be upgraded, or holds data the server can't read once it is, is left
-/// as it was (SPEC 15.7, 15.8).
+/// The files `SQLite` may keep beside a database.
+const JOURNALS: [&str; 3] = ["-journal", "-wal", "-shm"];
+
+/// The path of the journal file `suffix` beside the database `path`.
+fn journal(path: &Path, suffix: &str) -> PathBuf {
+    let mut journal = path.as_os_str().to_owned();
+    journal.push(suffix);
+    journal.into()
+}
+
+/// Reads the plan in a plan file, upgraded to the latest version, without
+/// changing the file or the journal files beside it, so that a file that's
+/// skipped, or can't be upgraded, is left as it was (SPEC 15.7, 15.8).
+///
+/// Opening a database lets `SQLite` roll back a transaction left in its
+/// journal, or move in or reset its WAL, so the plan is read from copies of
+/// the file and its journals in a scratch directory.
 fn read_plan_file(path: &Path) -> Result<Plan, Failure> {
     // Opening anything else, such as a named pipe, could block.
     if !fs::metadata(path)?.is_file() {
         return Err("it isn't a regular file".into());
     }
-    let conn = connect(path)?;
-    if schema_version(&conn)? == LATEST {
-        return read_plan(&conn);
+    let scratch = tempfile::tempdir()?;
+    let copy = scratch.path().join("plan.sqlite");
+    fs::copy(path, &copy)?;
+    for suffix in JOURNALS {
+        match fs::copy(journal(path, suffix), journal(&copy, suffix)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
     }
-    let mut copy = Connection::open_in_memory()?;
-    Backup::new(&conn, &mut copy)?.run_to_completion(i32::MAX, Duration::ZERO, None)?;
-    migrations().to_latest(&mut copy)?;
-    read_plan(&copy)
+    let mut conn = connect(&copy)?;
+    schema_version(&conn)?;
+    migrations().to_latest(&mut conn)?;
+    read_plan(&conn)
 }
 
 /// Upgrades a file to the latest schema version, in one transaction
@@ -98,7 +114,7 @@ fn upgrade(path: &Path) -> Result<(), Failure> {
 /// WAL and its index. Any journal file still there is one `SQLite` ignores: a
 /// rollback journal that holds no transaction, as `journal_mode = PERSIST`
 /// or `TRUNCATE` leave behind, an empty WAL, or a WAL index without a WAL.
-/// `SQLite` rolled back any journal that did hold one when the file was read,
+/// Opening the file to upgrade it rolled back any journal that did hold one,
 /// so what's left holds nothing the file needs, and is deleted.
 fn prepare(path: &Path) -> Result<(), Failure> {
     upgrade(path)?;
@@ -107,10 +123,8 @@ fn prepare(path: &Path) -> Result<(), Failure> {
     if !mode.eq_ignore_ascii_case("delete") {
         return Err(format!("it can't leave journal mode {mode}").into());
     }
-    for suffix in ["-journal", "-wal", "-shm"] {
-        let mut journal = path.as_os_str().to_owned();
-        journal.push(suffix);
-        if let Err(e) = fs::remove_file(&journal)
+    for suffix in JOURNALS {
+        if let Err(e) = fs::remove_file(journal(path, suffix))
             && e.kind() != io::ErrorKind::NotFound
         {
             return Err(e.into());
@@ -188,6 +202,8 @@ impl PlanFiles {
             }
         }
 
+        // Only the files read count as holding a plan: one skipped for another
+        // reason never causes another to be skipped (SPEC 15.7).
         let mut files_per_plan: HashMap<String, usize> = HashMap::new();
         for (_, plan) in &read {
             *files_per_plan.entry(plan.info.id.clone()).or_default() += 1;

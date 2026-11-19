@@ -476,6 +476,95 @@ fn files_it_cant_use_are_skipped_and_left_alone() {
     assert!(!stderr.contains("notes.txt"));
 }
 
+/// Every file in `dir` and what it holds, or `None` if it can't be read.
+fn contents(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    files(dir)
+        .into_iter()
+        .map(|f| {
+            let bytes = fs::read(dir.join(&f)).ok();
+            (f, bytes)
+        })
+        .collect()
+}
+
+/// Changes a plan file in WAL mode, closing it without a checkpoint, so the
+/// change is only in the WAL left beside it.
+fn change_in_wal(file: &Path, sql: &str) {
+    let conn = Connection::open(file).unwrap();
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )
+    .unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn.execute_batch(sql).unwrap();
+}
+
+/// A way to make a plan file one the server can't use, and its name.
+type Spoiler = (&'static str, fn(&Path));
+
+#[test]
+fn a_copy_skipped_for_another_reason_hides_nothing() {
+    let spoilers: [Spoiler; 4] = [
+        ("unreadable", |copy| {
+            fs::set_permissions(copy, fs::Permissions::from_mode(0o000)).unwrap();
+        }),
+        ("newer", |copy| {
+            change_in_wal(copy, "PRAGMA user_version = 2")
+        }),
+        ("broken past its plan row", |copy| {
+            change_in_wal(copy, "DROP TABLE payees");
+        }),
+        ("truncated", |copy| {
+            let bytes = fs::read(copy).unwrap();
+            fs::write(copy, &bytes[..bytes.len() / 2]).unwrap();
+        }),
+    ];
+    for (how, spoil) in spoilers {
+        let dir = data_dir();
+        let s = start_on(dir.path());
+        let plan = new_named_plan(&s, "Household");
+        drop(s);
+        let copy = dir.path().join("Copy.sqlite");
+        fs::copy(dir.path().join("Household.sqlite"), &copy).unwrap();
+        spoil(&copy);
+        let before: Vec<_> = contents(dir.path())
+            .into_iter()
+            .filter(|(f, _)| f.starts_with("Copy"))
+            .collect();
+
+        let s = start_on(dir.path());
+        assert_eq!(
+            expect(get(&s, "/plans"), 200),
+            serde_json::json!([plan]),
+            "{how}"
+        );
+        let after: Vec<_> = contents(dir.path())
+            .into_iter()
+            .filter(|(f, _)| f.starts_with("Copy"))
+            .collect();
+        assert_eq!(after, before, "{how}");
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+#[test]
+fn copies_of_a_plan_are_both_skipped_with_their_journals_left_alone() {
+    let dir = data_dir();
+    let s = start_on(dir.path());
+    new_named_plan(&s, "Household");
+    drop(s);
+    let copy = dir.path().join("Copy.sqlite");
+    fs::copy(dir.path().join("Household.sqlite"), &copy).unwrap();
+    change_in_wal(&copy, "UPDATE plan SET name = 'Changed'");
+    let before = contents(dir.path());
+    assert!(before.iter().any(|(f, _)| f == "Copy.sqlite-wal"));
+
+    let s = start_on(dir.path());
+    assert_eq!(expect(get(&s, "/plans"), 200), serde_json::json!([]));
+    assert_eq!(contents(dir.path()), before);
+}
+
 #[test]
 fn migrate_changes_only_plan_files_to_known_versions() {
     let dir = data_dir();
