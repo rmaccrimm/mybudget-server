@@ -5,6 +5,14 @@
 //! another method gets the JSON 405, with `Allow`, from the method-not-allowed
 //! fallback. Handlers then look up the path's objects (404) before reading
 //! the body (400) and checking conflicts (409).
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::similar_names,
+    clippy::missing_safety_doc
+)]
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
