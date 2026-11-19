@@ -851,3 +851,47 @@ fn a_skipped_file_with_a_line_break_in_its_name_is_named_on_one_line() {
         "{stderr}"
     );
 }
+
+/// Plan files are read and migrated without the system's temporary
+/// directory, which a sandboxed server may not be able to write in.
+#[test]
+fn files_are_read_without_a_temporary_directory() {
+    let dir = data_dir();
+    // A scratch directory left by a server killed while it read a file.
+    fs::create_dir(dir.path().join(".mybudget-scratch-left")).unwrap();
+    let s = start_on(dir.path());
+    let plan = new_named_plan(&s, "Household");
+    drop(s);
+    let file = dir.path().join("Household.sqlite");
+    let out = Command::new(env!("CARGO_BIN_EXE_mybudget-server"))
+        .env_clear()
+        .args(["migrate".as_ref(), file.as_os_str(), "1".as_ref()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut s = start_with(|c| {
+        c.env_clear()
+            .env("MYBUDGET_ADDR", "127.0.0.1:0")
+            .env("MYBUDGET_DATA", dir.path())
+            .stderr(Stdio::piped());
+    });
+    let plans = expect(get(&s, "/plans"), 200);
+    s.child.kill().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut s.child.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert_eq!(plans, serde_json::json!([plan]), "{stderr}");
+    assert_eq!(files(dir.path()), ["Household.sqlite"]);
+}
+
+#[test]
+fn a_skipped_file_is_named_as_it_is() {
+    let dir = data_dir();
+    let name = "Say \"hi\" \\ Cafe\u{301} \u{e000}.sqlite";
+    fs::write(dir.path().join(name), "not a database").unwrap();
+    let (_, stderr) = start_and_read_stderr(dir.path());
+    assert!(stderr.contains(name), "{stderr}");
+}

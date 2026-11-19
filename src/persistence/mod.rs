@@ -73,6 +73,17 @@ fn journal(path: &Path, suffix: &str) -> PathBuf {
     journal.into()
 }
 
+/// The start of the name of [`read_plan_file`]'s scratch directories.
+const SCRATCH_PREFIX: &str = ".mybudget-scratch-";
+
+/// Whether `path` is a scratch directory of [`read_plan_file`]'s.
+fn is_scratch(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        name.as_encoded_bytes()
+            .starts_with(SCRATCH_PREFIX.as_bytes())
+    })
+}
+
 /// Reads the plan in a plan file without changing the file or the journal
 /// files beside it, so that a file that's skipped, or can't be upgraded, is
 /// left as it was (SPEC 15.7, 15.8).
@@ -83,12 +94,25 @@ fn journal(path: &Path, suffix: &str) -> PathBuf {
 /// to the copy what it would do to the file. The copies keep the files'
 /// permission bits ([`fs::copy`]), so `ready` fails on the copy as it would
 /// on a file the server can't write, such as a read-only one in WAL mode.
+///
+/// The scratch directory goes beside the file, in a directory the server
+/// must be able to write in anyway (SPEC 15.1, 15.9), rather than in the
+/// system's temporary directory, which the server may not be able to write
+/// in. Its name doesn't end in `.sqlite`, so it's never taken for a plan
+/// file (SPEC 15.5), and one left over by a server killed while reading is
+/// removed when a server next starts on the directory.
 fn read_plan_file(path: &Path, ready: fn(&Path) -> Result<(), Failure>) -> Result<Plan, Failure> {
     // Opening anything else, such as a named pipe, could block.
     if !fs::metadata(path)?.is_file() {
         return Err("it isn't a regular file".into());
     }
-    let scratch = tempfile::tempdir()?;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let scratch = tempfile::Builder::new()
+        .prefix(SCRATCH_PREFIX)
+        .tempdir_in(dir)?;
     let copy = scratch.path().join("plan.sqlite");
     fs::copy(path, &copy)?;
     for suffix in JOURNALS {
@@ -159,11 +183,26 @@ fn is_taken(path: &Path, own: Option<&Path>) -> bool {
 }
 
 /// Writes a line to stderr naming a file the server won't serve, and why
-/// (SPEC 15.7). Both are quoted and escaped as Rust's `Debug` does, so
-/// control characters and line breaks in them can't break the line.
+/// (SPEC 15.7).
 fn skip(path: &Path, reason: impl std::fmt::Display) {
-    let name = path.display().to_string();
-    crate::log(format_args!("skipping {name:?}: {:?}", reason.to_string()));
+    let name = one_line(&path.display().to_string());
+    let reason = one_line(&reason.to_string());
+    crate::log(format_args!("skipping {name}: {reason}"));
+}
+
+/// `text` as it is, except that control characters and Unicode's line and
+/// paragraph separators are escaped as Rust writes them, such as `\n`, so
+/// they can't break the line (SPEC 15.7).
+fn one_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// Checks the server can create, write and delete files in `dir` (SPEC 15.1).
@@ -194,6 +233,9 @@ impl PlanFiles {
             let path = entry.map_err(unusable)?.path();
             if path.as_os_str().as_encoded_bytes().ends_with(b".sqlite") {
                 paths.push(path);
+            } else if is_scratch(&path) {
+                // Left by a server killed while it read a file.
+                let _ = fs::remove_dir_all(&path);
             }
         }
         paths.sort();
