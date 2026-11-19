@@ -14,6 +14,7 @@
     clippy::missing_safety_doc
 )]
 
+use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::{
@@ -41,6 +42,13 @@ use api::{accounts, categories, months, payees, plans, transactions};
 use error::ApiError;
 pub use persistence::migrate;
 pub use store::Store;
+
+/// Writes a line to stderr, for whoever runs the server. Unlike `eprintln!`,
+/// it doesn't panic if stderr is closed: a parent that doesn't read stderr
+/// mustn't stop the server from starting (SPEC 15.7) or answering (15.10).
+fn log(line: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
 
 /// The state handlers share: the store, behind one lock.
 #[derive(Clone)]

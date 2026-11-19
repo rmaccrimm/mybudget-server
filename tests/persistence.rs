@@ -611,3 +611,81 @@ fn a_read_only_plan_file_keeps_its_name_and_data() {
     );
     assert_eq!(files(dir.path()), ["Renamed.sqlite"]);
 }
+
+#[test]
+fn a_rename_falls_back_to_the_whole_id_then_returns_500() {
+    let dir = data_dir();
+    let s = start_on(dir.path());
+    let plan = id(&new_named_plan(&s, "Household"));
+    let rename = |name: &str| {
+        patch(
+            &s,
+            &format!("/plans/{plan}"),
+            &serde_json::json!({ "name": name }).to_string(),
+        )
+    };
+    fs::write(dir.path().join("Bills.sqlite"), "taken").unwrap();
+    fs::create_dir(dir.path().join(format!("Bills ({}).sqlite", &plan[..8]))).unwrap();
+    expect(rename("Bills"), 200);
+    let whole = format!("Bills ({plan}).sqlite");
+    assert!(dir.path().join(&whole).is_file());
+
+    // Clashes by letter case, and with a dangling symlink, count too.
+    fs::write(dir.path().join("Rent.sqlite"), "taken").unwrap();
+    fs::write(dir.path().join(format!("rent ({}).sqlite", &plan[..8])), "").unwrap();
+    std::os::unix::fs::symlink("nowhere", dir.path().join(format!("Rent ({plan}).sqlite")))
+        .unwrap();
+    err(&rename("Rent"), 500);
+    assert_eq!(
+        expect(get(&s, &format!("/plans/{plan}")), 200)["name"],
+        "Bills"
+    );
+    assert!(dir.path().join(&whole).is_file());
+    assert_eq!(fs::read(dir.path().join("Rent.sqlite")).unwrap(), b"taken");
+}
+
+/// Makes a named pipe, which blocks whoever opens it to read until something
+/// writes to it.
+fn mkfifo(path: &Path) {
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+#[test]
+fn named_pipes_are_skipped_and_count_as_taken() {
+    let dir = data_dir();
+    mkfifo(&dir.path().join("Pipe.sqlite"));
+    let s = start_on(dir.path());
+    let plan = id(&new_named_plan(&s, "Pipe"));
+    assert!(
+        dir.path()
+            .join(format!("Pipe ({}).sqlite", &plan[..8]))
+            .is_file()
+    );
+    mkfifo(&dir.path().join("Fifo.sqlite"));
+    expect(
+        patch(&s, &format!("/plans/{plan}"), r#"{"name": "Fifo"}"#),
+        200,
+    );
+    assert!(
+        dir.path()
+            .join(format!("Fifo ({}).sqlite", &plan[..8]))
+            .is_file()
+    );
+}
+
+#[test]
+fn a_closed_stderr_stops_nothing() {
+    let dir = data_dir();
+    fs::write(dir.path().join("Garbage.sqlite"), "not a database").unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let s = start_with(|c| {
+        c.env("MYBUDGET_DATA", dir.path()).stderr(writer);
+    });
+    let plan = id(&new_named_plan(&s, "Garbage"));
+    let rename = || patch(&s, &format!("/plans/{plan}"), r#"{"name": "Renamed"}"#);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    err(&rename(), 500);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    expect(rename(), 200);
+}

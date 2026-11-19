@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -69,6 +70,10 @@ fn schema_version(conn: &Connection) -> Result<usize, Failure> {
 /// can't be upgraded, or holds data the server can't read once it is, is left
 /// as it was (SPEC 15.7, 15.8).
 fn read_plan_file(path: &Path) -> Result<Plan, Failure> {
+    // Opening anything else, such as a named pipe, could block.
+    if !fs::metadata(path)?.is_file() {
+        return Err("it isn't a regular file".into());
+    }
     let conn = connect(path)?;
     if schema_version(&conn)? == LATEST {
         return read_plan(&conn);
@@ -125,18 +130,22 @@ fn write_file(path: &Path, old: Option<&Plan>, new: &Plan) -> Result<(), Failure
 
 /// Whether anything in the directory has the name of `path`, or one the file
 /// system treats as the same, other than the file `own` (SPEC 15.2, 15.4).
+/// Only metadata is looked at, since opening what's there, such as a named
+/// pipe, could block.
 fn is_taken(path: &Path, own: Option<&Path>) -> bool {
-    match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-        Err(_) => true,
-        Ok(_) => !own.is_some_and(|own| same_file::is_same_file(path, own).unwrap_or(false)),
-    }
+    let found = match fs::symlink_metadata(path) {
+        Err(e) => return e.kind() != io::ErrorKind::NotFound,
+        Ok(found) => found,
+    };
+    let inode = |m: &fs::Metadata| (m.dev(), m.ino());
+    own.and_then(|own| fs::symlink_metadata(own).ok())
+        .is_none_or(|own| inode(&own) != inode(&found))
 }
 
 /// Writes a line to stderr naming a file the server won't serve, and why
 /// (SPEC 15.7).
 fn skip(path: &Path, reason: impl std::fmt::Display) {
-    eprintln!("skipping {}: {reason}", path.display());
+    crate::log(format_args!("skipping {}: {reason}", path.display()));
 }
 
 /// Checks the server can create, write and delete files in `dir` (SPEC 15.1).
@@ -249,11 +258,11 @@ impl PlanFiles {
         fs::rename(path, &renamed)?;
         if let Err(e) = write_file(&renamed, Some(old), new) {
             if let Err(undo) = fs::rename(&renamed, path) {
-                eprintln!(
+                crate::log(format_args!(
                     "couldn't rename {} back to {}: {undo}",
                     renamed.display(),
                     path.display()
-                );
+                ));
             }
             return Err(e);
         }

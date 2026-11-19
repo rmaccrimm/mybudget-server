@@ -26,9 +26,8 @@ pub fn safe_name(name: &str) -> String {
 }
 
 /// The names a plan's file may have, best first: its safe name, then with the
-/// first 8 characters of its id for when that's taken (SPEC 15.2). The last,
-/// with the whole id, is for the rare case that both are taken, which the
-/// spec leaves open.
+/// first 8 characters of its id for when that's taken, then with the whole
+/// id for when both are (SPEC 15.2).
 pub fn file_names(plan_name: &str, plan_id: &str) -> [String; 3] {
     let safe = safe_name(plan_name);
     let short_id: String = plan_id.chars().take(8).collect();

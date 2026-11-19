@@ -25,7 +25,7 @@ pub struct Store {
 /// The 500 for a change the server couldn't save (SPEC 15.10). The cause
 /// goes to stderr, for whoever runs the server.
 fn unsaved(plan_id: &str, cause: impl std::fmt::Display) -> ApiError {
-    eprintln!("couldn't save plan {plan_id}: {cause}");
+    crate::log(format_args!("couldn't save plan {plan_id}: {cause}"));
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "the server couldn't save the change",
