@@ -132,8 +132,15 @@ fn never_listens_when_stdin_starts_at_eof() {
             })
         })
         .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::write(&empty, "").unwrap();
     for _ in 0..30 {
         exits_without_listening(Stdio::null());
+        exits_without_listening(std::fs::File::open(&empty).unwrap());
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.shutdown(std::net::Shutdown::Write).unwrap();
+        exits_without_listening(OwnedFd::from(theirs));
         let (reader, writer) = std::io::pipe().unwrap();
         drop(writer);
         exits_without_listening(reader);
@@ -165,6 +172,52 @@ fn keeps_running_until_eof(stdin: OwnedFd, mut other_end: impl Write) {
     assert!(s.child.try_wait().unwrap().is_none(), "exited after input");
     assert_eq!(get(&s, "/health").body, "ok");
     drop(other_end);
+    let status = exit_within(&mut s, Duration::from_secs(1)).expect("still running");
+    assert!(status.success(), "{status}");
+}
+
+/// Starts the server with the flag set and `stdin`, and checks that it prints
+/// 1.3's line within two seconds.
+fn start_promptly(stdin: impl Into<Stdio> + Send + 'static) -> Server {
+    let (started, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = started.send(start_with(|c| {
+            c.stdin(stdin).env("MYBUDGET_EXIT_ON_STDIN_EOF", "1");
+        }));
+    });
+    wait.recv_timeout(Duration::from_secs(2))
+        .expect("didn't start listening")
+}
+
+/// A device that never runs dry is never at end of file.
+#[test]
+fn starts_while_stdin_is_endless_device() {
+    let mut s = start_promptly(std::fs::File::open("/dev/zero").unwrap());
+    sleep(Duration::from_millis(300));
+    assert!(s.child.try_wait().unwrap().is_none());
+    assert_eq!(get(&s, "/health").body, "ok");
+}
+
+/// Input that never stops coming, from before the server starts, neither
+/// delays startup nor ends the server.
+#[test]
+fn starts_while_stdin_never_stops() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let feeder = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if writer.write_all(&[b'x'; 65536]).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let mut s = start_promptly(reader);
+    assert_eq!(get(&s, "/health").body, "ok");
+    stop.store(true, Ordering::Relaxed);
+    feeder.join().unwrap();
     let status = exit_within(&mut s, Duration::from_secs(1)).expect("still running");
     assert!(status.success(), "{status}");
 }

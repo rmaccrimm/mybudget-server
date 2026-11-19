@@ -1,9 +1,10 @@
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::mpsc::{Receiver, sync_channel};
 use std::sync::{Arc, OnceLock};
 
 use mybudget_server::{AppState, Store};
@@ -29,18 +30,20 @@ fn main() -> ExitCode {
 
 /// Serves the plans. SPEC 1.4's watch on stdin starts first, since it holds
 /// while the plans are still loading; `ready` hands it the state once there
-/// is one, and the line SPEC 1.3 asks for waits until the watch has read all
-/// that was already waiting.
+/// is one. End of file already waiting when the server would print the line
+/// SPEC 1.3 asks for ends it there instead, whether or not the watch has
+/// read it yet (SPEC 1.4).
 fn run() -> Result<(), String> {
     let ready = Arc::new(OnceLock::new());
-    let watch = std::env::var_os("MYBUDGET_EXIT_ON_STDIN_EOF")
-        .is_some_and(|v| v == "1")
-        .then(|| StdinWatch::start(Arc::clone(&ready)));
+    let exit_on_eof = std::env::var_os("MYBUDGET_EXIT_ON_STDIN_EOF").is_some_and(|v| v == "1");
+    if exit_on_eof {
+        exit_on_stdin_eof(Arc::clone(&ready));
+    }
     let store = open_store()?;
     let state = ready.get_or_init(|| AppState::new(store)).clone();
     let listener = bind().map_err(|e| e.to_string())?;
-    if let Some(watch) = watch {
-        watch.wait_until_caught_up();
+    if exit_on_eof && stdin_eof_is_waiting() {
+        state.exit();
     }
     // The test harness reads this line to find the port (SPEC 1.3).
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
@@ -90,67 +93,74 @@ async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
 /// that isn't end of file. Such a read is retried after a short pause, well
 /// inside the one-second limit; other read errors end the server, since the
 /// parent can then no longer be heard from (SPEC 1.4 leaves that case open).
-struct StdinWatch {
-    /// Gets a message each time the watch finishes a read that didn't end
-    /// the server. It holds at most one, so nothing piles up once no one
-    /// waits on it.
-    read_done: Receiver<()>,
+fn exit_on_stdin_eof(ready: Arc<OnceLock<AppState>>) {
+    const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut discard = [0; 4096];
+        loop {
+            match stdin.read(&mut discard) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(RETRY_PAUSE);
+                }
+                Err(_) => break,
+            }
+        }
+        match ready.get() {
+            Some(state) => state.exit(),
+            None => std::process::exit(0),
+        }
+    });
 }
 
-impl StdinWatch {
-    fn start(ready: Arc<OnceLock<AppState>>) -> Self {
-        const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
-        let (read_done, waiter) = sync_channel(1);
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            let mut discard = [0; 4096];
-            loop {
-                match stdin.read(&mut discard) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        std::thread::sleep(RETRY_PAUSE);
-                    }
-                    Err(_) => break,
-                }
-                // A full channel already says a read finished, and once
-                // startup is over no one listens.
-                let _ = read_done.try_send(());
-            }
-            match ready.get() {
-                Some(state) => state.exit(),
-                None => std::process::exit(0),
-            }
-        });
-        Self { read_done: waiter }
+/// Whether stdin's end of file is already there, read yet or not, so that the
+/// server mustn't print 1.3's line (SPEC 1.4). It never waits, so the answer
+/// doesn't hang on how the watch's thread is scheduled, and a quiet or busy
+/// stdin doesn't hold startup up.
+///
+/// `poll` answers for a pipe or socket: `POLLHUP` says its other end is
+/// closed, so end of file is next once what's waiting is read; without it,
+/// whatever is or isn't waiting, more may come. It can't answer for a regular
+/// file, which it always calls readable, or for a device it can't watch, such
+/// as `/dev/null` (`POLLNVAL`). A read there returns at once, so one read
+/// answers; what it takes is ignored, like all that stdin brings. If `poll`
+/// or that read fails, the watch decides.
+fn stdin_eof_is_waiting() -> bool {
+    // A handle of our own, since the watch keeps `Stdin`'s lock.
+    let Ok(stdin) = std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(File::from)
+    else {
+        return false;
+    };
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let revents = loop {
+        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+        match poll(&mut fds, Some(&now)) {
+            Ok(_) => break fds[0].revents(),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    };
+    if revents.contains(PollFlags::HUP) {
+        return true;
     }
-
-    /// Returns once stdin has nothing waiting, so a read would block. Until
-    /// then, what is waiting may be end of file (SPEC 1.4: then the server
-    /// exits without printing 1.3's line), so each time `poll` says a read
-    /// would return at once, this waits for the watch to finish one more
-    /// read. End of file there before the call therefore always ends the
-    /// process before this returns, however the threads are scheduled. A
-    /// quiet pipe or socket, blocking or not, returns at once.
-    fn wait_until_caught_up(self) {
-        let stdin = std::io::stdin();
-        let now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        loop {
-            match poll(&mut [PollFd::new(&stdin, PollFlags::IN)], Some(&now)) {
-                Ok(0) => return,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                // `poll` can't say, and the watch still ends the server
-                // within the second.
-                Err(_) => return,
-                Ok(_) => {}
-            }
-            self.read_done
-                .recv()
-                .expect("the watch ends the process before it stops sending");
+    let is_file = stdin.metadata().is_ok_and(|m| m.is_file());
+    if !is_file && !revents.contains(PollFlags::NVAL) {
+        return false;
+    }
+    loop {
+        match (&stdin).read(&mut [0; 4096]) {
+            Ok(n) => return n == 0,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return false,
         }
     }
 }
