@@ -73,14 +73,17 @@ fn journal(path: &Path, suffix: &str) -> PathBuf {
     journal.into()
 }
 
-/// Reads the plan in a plan file, upgraded to the latest version, without
-/// changing the file or the journal files beside it, so that a file that's
-/// skipped, or can't be upgraded, is left as it was (SPEC 15.7, 15.8).
+/// Reads the plan in a plan file without changing the file or the journal
+/// files beside it, so that a file that's skipped, or can't be upgraded, is
+/// left as it was (SPEC 15.7, 15.8).
 ///
 /// Opening a database lets `SQLite` roll back a transaction left in its
 /// journal, or move in or reset its WAL, so the plan is read from copies of
-/// the file and its journals in a scratch directory.
-fn read_plan_file(path: &Path) -> Result<Plan, Failure> {
+/// the file and its journals in a scratch directory, after `ready` has done
+/// to the copy what it would do to the file. The copies keep the files'
+/// permission bits ([`fs::copy`]), so `ready` fails on the copy as it would
+/// on a file the server can't write, such as a read-only one in WAL mode.
+fn read_plan_file(path: &Path, ready: fn(&Path) -> Result<(), Failure>) -> Result<Plan, Failure> {
     // Opening anything else, such as a named pipe, could block.
     if !fs::metadata(path)?.is_file() {
         return Err("it isn't a regular file".into());
@@ -94,10 +97,9 @@ fn read_plan_file(path: &Path) -> Result<Plan, Failure> {
             _ => {}
         }
     }
-    let mut conn = connect(&copy)?;
-    schema_version(&conn)?;
-    migrations().to_latest(&mut conn)?;
-    read_plan(&conn)
+    schema_version(&connect(&copy)?)?;
+    ready(&copy)?;
+    read_plan(&connect(&copy)?)
 }
 
 /// Upgrades a file to the latest schema version, in one transaction
@@ -157,9 +159,11 @@ fn is_taken(path: &Path, own: Option<&Path>) -> bool {
 }
 
 /// Writes a line to stderr naming a file the server won't serve, and why
-/// (SPEC 15.7).
+/// (SPEC 15.7). Both are quoted and escaped as Rust's `Debug` does, so
+/// control characters and line breaks in them can't break the line.
 fn skip(path: &Path, reason: impl std::fmt::Display) {
-    crate::log(format_args!("skipping {}: {reason}", path.display()));
+    let name = path.display().to_string();
+    crate::log(format_args!("skipping {name:?}: {:?}", reason.to_string()));
 }
 
 /// Checks the server can create, write and delete files in `dir` (SPEC 15.1).
@@ -194,15 +198,16 @@ impl PlanFiles {
         }
         paths.sort();
 
+        // A file the server would serve were it the only one.
         let mut read = Vec::new();
         for path in paths {
-            match read_plan_file(&path) {
+            match read_plan_file(&path, prepare) {
                 Ok(plan) => read.push((path, plan)),
                 Err(reason) => skip(&path, reason),
             }
         }
 
-        // Only the files read count as holding a plan: one skipped for another
+        // Only those files count as holding a plan: one skipped for another
         // reason never causes another to be skipped (SPEC 15.7).
         let mut files_per_plan: HashMap<String, usize> = HashMap::new();
         for (_, plan) in &read {
@@ -308,6 +313,6 @@ pub fn migrate(file: &Path, version: &str) -> Result<(), String> {
 /// Changes a file the server can read to `target`, in one transaction; any
 /// other file is left as it was.
 fn migrate_file(file: &Path, target: usize) -> Result<(), Failure> {
-    read_plan_file(file)?;
+    read_plan_file(file, upgrade)?;
     Ok(migrations().to_version(&mut connect(file)?, target)?)
 }

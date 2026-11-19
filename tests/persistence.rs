@@ -778,3 +778,76 @@ fn a_closed_stderr_stops_nothing() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     expect(rename(), 200);
 }
+
+/// Starts a server on `dir`, kills it, and returns the plans it served and
+/// what it wrote to stderr.
+fn start_and_read_stderr(dir: &Path) -> (Value, String) {
+    let mut s = start_with(|c| {
+        c.env("MYBUDGET_DATA", dir).stderr(Stdio::piped());
+    });
+    let plans = expect(get(&s, "/plans"), 200);
+    s.child.kill().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut s.child.stderr.take().unwrap(), &mut stderr).unwrap();
+    (plans, stderr)
+}
+
+#[test]
+fn a_read_only_copy_in_wal_mode_is_skipped_and_hides_nothing() {
+    let dir = data_dir();
+    let s = start_on(dir.path());
+    let plan = new_named_plan(&s, "Household");
+    drop(s);
+    let copy = dir.path().join("Copy.sqlite");
+    fs::copy(dir.path().join("Household.sqlite"), &copy).unwrap();
+    change_in_wal(&copy, "UPDATE plan SET name = 'Changed'");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o444)).unwrap();
+    let copies = || -> Vec<_> {
+        contents(dir.path())
+            .into_iter()
+            .filter(|(f, _)| f.starts_with("Copy"))
+            .collect()
+    };
+    let before = copies();
+
+    // Alone, the copy can't be served: it can't leave WAL mode.
+    let alone = data_dir();
+    for (f, _) in &before {
+        fs::copy(dir.path().join(f), alone.path().join(f)).unwrap();
+    }
+    let (plans, stderr) = start_and_read_stderr(alone.path());
+    assert_eq!(plans, serde_json::json!([]));
+    assert!(stderr.contains("Copy.sqlite"), "{stderr}");
+
+    // So it doesn't hide the plan in the other file.
+    let (plans, stderr) = start_and_read_stderr(dir.path());
+    assert_eq!(plans, serde_json::json!([plan]));
+    assert!(stderr.contains("Copy.sqlite"), "{stderr}");
+    assert_eq!(copies(), before);
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+#[test]
+fn a_skipped_file_with_a_line_break_in_its_name_is_named_on_one_line() {
+    let dir = data_dir();
+    fs::write(dir.path().join("Bad\nname.sqlite"), "not a database").unwrap();
+    fs::write(dir.path().join("Other\r\u{2028}name.sqlite"), "").unwrap();
+    let (_, stderr) = start_and_read_stderr(dir.path());
+    let lines: Vec<_> = stderr.lines().collect();
+    for start in ["Bad", "Other"] {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(start) && l.contains("name.sqlite")),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|l| l.starts_with("name.sqlite")),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains('\u{2028}') && !stderr.contains('\r'),
+        "{stderr}"
+    );
+}
