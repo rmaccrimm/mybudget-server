@@ -7,11 +7,12 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Serialize;
 
 use crate::AppState;
 use crate::error::ApiError;
 use crate::fields::{self, Body};
-use crate::model::{AccountType, ById};
+use crate::model::{AccountType, AccountView, ById, Transaction};
 
 pub async fn list(
     State(state): State<AppState>,
@@ -120,4 +121,41 @@ pub async fn delete(
     }
     store.change_plan(&plan_id, |plan| plan.delete_account(&account_id))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What reconciling returns: the account and the adjustment, if any
+/// (SPEC 14.1).
+#[derive(Serialize)]
+struct Reconciled {
+    account: AccountView,
+    adjustment: Option<Transaction>,
+}
+
+pub async fn reconcile(
+    State(state): State<AppState>,
+    Path((plan_id, account_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let plan = store.plan(&plan_id)?;
+    plan.accounts.by_id(&account_id)?;
+    let body = Body::parse(&body)?;
+    let balance = body.required("balance", fields::amount)?;
+    let date = body.required("date", fields::date)?;
+    // Every transaction's amount stays an amount (SPEC 14.2).
+    let adjustment = balance
+        .checked_sub(plan.balances(&account_id).cleared_balance)
+        .filter(|&a| fields::is_amount(a))
+        .ok_or_else(|| {
+            ApiError::conflict("the adjustment would be outside the range of amounts")
+        })?;
+
+    let reconciled = store.change_plan(&plan_id, |plan| {
+        let adjustment_id = plan.reconcile(&account_id, adjustment, date);
+        Reconciled {
+            account: plan.account_view(&account_id),
+            adjustment: adjustment_id.map(|id| plan.transactions[&id].clone()),
+        }
+    })?;
+    Ok(Json(reconciled))
 }

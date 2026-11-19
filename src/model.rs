@@ -16,6 +16,8 @@ use crate::error::ApiError;
 pub const READY_TO_ASSIGN: &str = "ready_to_assign";
 /// The payee of starting balance transactions (SPEC 5.3).
 pub const STARTING_BALANCE_PAYEE: &str = "Starting Balance";
+/// The payee of reconciliation adjustments (SPEC 14.2).
+pub const RECONCILIATION_PAYEE: &str = "Reconciliation Balance Adjustment";
 /// The internal group's name (SPEC 7.1).
 pub const CREDIT_CARD_PAYMENTS: &str = "Credit Card Payments";
 
@@ -380,21 +382,47 @@ impl Plan {
             },
         );
         if let Some((amount, date)) = starting.filter(|(amount, _)| *amount != 0) {
-            let transaction = Transaction {
-                id: new_id(),
-                account_id: account_id.clone(),
+            self.add_balance_transaction(
+                &account_id,
+                kind,
                 date,
                 amount,
-                payee_id: Some(self.payee_by_name(STARTING_BALANCE_PAYEE)),
-                category_id: kind.on_budget().then(|| READY_TO_ASSIGN.to_owned()),
-                cleared: Cleared::Cleared,
-                approved: true,
-                ..Default::default()
-            };
-            self.transactions
-                .insert(transaction.id.clone(), transaction);
+                STARTING_BALANCE_PAYEE,
+                Cleared::Cleared,
+            );
         }
         account_id
+    }
+
+    /// Adds a transaction the server makes to set an account's balance: a
+    /// starting balance (SPEC 5.3) or a reconciliation adjustment
+    /// (SPEC 14.2). Its payee is found or created by name (SPEC 6.5), its
+    /// memo is `null`, it's approved with no flag, and its category is
+    /// `ready_to_assign` in an on-budget account and none in a tracking one.
+    /// Returns its id.
+    fn add_balance_transaction(
+        &mut self,
+        account_id: &str,
+        kind: AccountType,
+        date: String,
+        amount: i64,
+        payee_name: &str,
+        cleared: Cleared,
+    ) -> String {
+        let transaction = Transaction {
+            id: new_id(),
+            account_id: account_id.to_owned(),
+            date,
+            amount,
+            payee_id: Some(self.payee_by_name(payee_name)),
+            category_id: kind.on_budget().then(|| READY_TO_ASSIGN.to_owned()),
+            cleared,
+            approved: true,
+            ..Default::default()
+        };
+        let id = transaction.id.clone();
+        self.transactions.insert(id.clone(), transaction);
+        id
     }
 
     /// Renames an account, its transfer payee and its payment category
@@ -417,6 +445,36 @@ impl Plan {
             category.name.clone_from(&name);
         }
         account.name = name;
+    }
+
+    /// Reconciles an account (SPEC 14.2, 14.3): adds an adjustment of
+    /// `adjustment` milliunits dated `date` unless it's 0, then marks every
+    /// cleared transaction in the account reconciled. The caller checks the
+    /// adjustment is an amount (SPEC 3.7). Returns the adjustment's id.
+    pub fn reconcile(&mut self, account_id: &str, adjustment: i64, date: String) -> Option<String> {
+        let kind = self
+            .accounts
+            .get(account_id)
+            .expect("the caller found the account")
+            .kind;
+        let adjustment_id = (adjustment != 0).then(|| {
+            self.add_balance_transaction(
+                account_id,
+                kind,
+                date,
+                adjustment,
+                RECONCILIATION_PAYEE,
+                Cleared::Reconciled,
+            )
+        });
+        for t in self
+            .transactions
+            .values_mut()
+            .filter(|t| t.account_id == account_id && t.cleared == Cleared::Cleared)
+        {
+            t.cleared = Cleared::Reconciled;
+        }
+        adjustment_id
     }
 
     pub fn account_has_transactions(&self, account_id: &str) -> bool {

@@ -116,6 +116,10 @@ pub fn app(state: AppState) -> Router {
                 .delete(accounts::delete),
         )
         .route(
+            "/plans/{plan}/accounts/{account}/reconcile",
+            post(accounts::reconcile),
+        )
+        .route(
             "/plans/{plan}/payees",
             get(payees::list).post(payees::create),
         )

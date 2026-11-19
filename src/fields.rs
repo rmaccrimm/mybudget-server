@@ -197,6 +197,11 @@ pub fn boolean(field: &str, v: &Json) -> Result<bool, ApiError> {
     }
 }
 
+/// Whether `n` milliunits is within the range of amounts (SPEC 3.7).
+pub fn is_amount(n: i64) -> bool {
+    (-MAX_AMOUNT..=MAX_AMOUNT).contains(&n)
+}
+
 /// An amount in milliunits: a JSON integer with no fraction or exponent,
 /// within ±[`MAX_AMOUNT`]. `-0` is 0 (SPEC 3.7).
 pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
@@ -205,7 +210,7 @@ pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
         _ => None,
     };
     match parsed {
-        Some(n) if (-MAX_AMOUNT..=MAX_AMOUNT).contains(&n) => Ok(n),
+        Some(n) if is_amount(n) => Ok(n),
         _ => Err(ApiError::bad_request(format!(
             "{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"
         ))),
