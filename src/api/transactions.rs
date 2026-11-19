@@ -16,7 +16,7 @@ use axum::{
 use crate::AppState;
 use crate::calendar;
 use crate::error::ApiError;
-use crate::fields::{self, Body, nullable};
+use crate::fields::{self, Body, Patch};
 use crate::json::Json as JsonValue;
 use crate::model::{
     Account, AccountType, ById, Cleared, FlagColor, Plan, READY_TO_ASSIGN, Subtransaction,
@@ -28,12 +28,9 @@ use crate::model::{
 
 /// A category id in a body must name something that exists: Ready to
 /// Assign or one of the plan's categories (SPEC 3.4, 4.5).
-fn category_id(plan: &Plan, field: &str, v: &JsonValue) -> Result<Option<String>, ApiError> {
-    let id = nullable(fields::string)(field, v)?;
-    if let Some(id) = &id
-        && id != READY_TO_ASSIGN
-        && !plan.categories.contains_key(id)
-    {
+fn category_id(plan: &Plan, field: &str, v: &JsonValue) -> Result<String, ApiError> {
+    let id = fields::string(field, v)?;
+    if id != READY_TO_ASSIGN && !plan.categories.contains_key(&id) {
         return Err(ApiError::bad_request(format!(
             "{field} doesn't name one of the plan's categories"
         )));
@@ -69,8 +66,9 @@ fn subtransactions(plan: &Plan, field: &str, v: &JsonValue) -> Result<Vec<SubInp
             let sub = Body::object(&format!("each of {field}"), item)?;
             Ok(SubInput {
                 amount: sub.required("amount", fields::amount)?,
-                category_id: sub.required("category_id", |f, v| category_id(plan, f, v))?,
-                memo: sub.optional("memo", fields::note)?.flatten(),
+                category_id: sub
+                    .required_nullable("category_id", |f, v| category_id(plan, f, v))?,
+                memo: sub.nullable("memo", fields::note)?.or_null(),
             })
         })
         .collect()
@@ -83,35 +81,35 @@ struct Input {
     amount: Option<i64>,
     /// Who the request says the payee is, if it says.
     payee: Option<PayeeChoice>,
-    category_id: Option<Option<String>>,
-    memo: Option<Option<String>>,
+    category_id: Patch<String>,
+    memo: Patch<String>,
     cleared: Option<Cleared>,
     approved: Option<bool>,
-    flag_color: Option<Option<FlagColor>>,
+    flag_color: Patch<FlagColor>,
     subtransactions: Option<Vec<SubInput>>,
 }
 
 impl Input {
     fn parse(plan: &Plan, body: &Body) -> Result<Self, ApiError> {
-        let payee_id = body.optional("payee_id", nullable(fields::string))?;
-        if let Some(Some(id)) = &payee_id
+        let payee_id = body.nullable("payee_id", fields::string)?;
+        if let Patch::Set(id) = &payee_id
             && !plan.payees.contains_key(id)
         {
             return Err(ApiError::bad_request(
                 "payee_id doesn't name one of the plan's payees",
             ));
         }
-        let payee_name = body.optional("payee_name", nullable(fields::payee_name))?;
+        let payee_name = body.nullable("payee_name", fields::payee_name)?;
         Ok(Self {
             account_id: body.optional("account_id", fields::string)?,
             date: body.optional("date", fields::date)?,
             amount: body.optional("amount", fields::amount)?,
             payee: PayeeChoice::requested(payee_id, payee_name),
-            category_id: body.optional("category_id", |f, v| category_id(plan, f, v))?,
-            memo: body.optional("memo", fields::note)?,
+            category_id: body.nullable("category_id", |f, v| category_id(plan, f, v))?,
+            memo: body.nullable("memo", fields::note)?,
             cleared: body.optional("cleared", fields::variant)?,
             approved: body.optional("approved", fields::boolean)?,
-            flag_color: body.optional("flag_color", nullable(fields::variant))?,
+            flag_color: body.nullable("flag_color", fields::variant)?,
             subtransactions: body
                 .optional("subtransactions", |f, v| subtransactions(plan, f, v))?,
         })
@@ -133,15 +131,12 @@ impl PayeeChoice {
     /// The payee a body asks for, or `None` if it leaves the payee as it is.
     /// A `payee_id` wins over a `payee_name`; `payee_id: null` asks for no
     /// payee, and `payee_name: null` alone asks for nothing.
-    fn requested(
-        payee_id: Option<Option<String>>,
-        payee_name: Option<Option<String>>,
-    ) -> Option<Self> {
+    fn requested(payee_id: Patch<String>, payee_name: Patch<String>) -> Option<Self> {
         match (payee_id, payee_name) {
-            (Some(Some(id)), _) => Some(Self::Id(id)),
-            (_, Some(Some(name))) => Some(Self::Name(name)),
-            (Some(None), _) => Some(Self::NoPayee),
-            (None, _) => None,
+            (Patch::Set(id), _) => Some(Self::Id(id)),
+            (_, Patch::Set(name)) => Some(Self::Name(name)),
+            (Patch::Null, _) => Some(Self::NoPayee),
+            (Patch::Absent, _) => None,
         }
     }
 
@@ -362,9 +357,9 @@ impl Desired {
     /// Copies what's asked for into `t`, except the payee, the category and
     /// the transfer links, which depend on more than the request.
     fn apply(&self, t: &mut Transaction) {
-        t.date = self.date.clone();
+        t.date.clone_from(&self.date);
         t.amount = self.amount;
-        t.memo = self.memo.clone();
+        t.memo.clone_from(&self.memo);
         t.cleared = self.cleared;
         t.approved = self.approved;
         t.flag_color = self.flag_color;
@@ -419,11 +414,11 @@ pub async fn create(
         date,
         amount,
         payee: input.payee.unwrap_or(PayeeChoice::NoPayee),
-        category: input.category_id.flatten(),
-        memo: input.memo.flatten(),
+        category: input.category_id.or_null(),
+        memo: input.memo.or_null(),
         cleared: input.cleared.unwrap_or(Cleared::default_for(account.kind)),
         approved: input.approved.unwrap_or(true),
-        flag_color: input.flag_color.flatten(),
+        flag_color: input.flag_color.or_null(),
         subs: input.subtransactions.unwrap_or_default(),
     };
     let transfer = validate(plan, account, &d)?;
@@ -496,8 +491,9 @@ pub async fn update(
         .subtransactions
         .unwrap_or_else(|| t.subtransactions.iter().map(SubInput::from).collect());
     let category = match input.category_id {
-        Some(category) => category,
-        None => kept_category(
+        Patch::Set(id) => Some(id),
+        Patch::Null => None,
+        Patch::Absent => kept_category(
             plan,
             &t,
             account,
@@ -510,10 +506,10 @@ pub async fn update(
         amount: input.amount.unwrap_or(t.amount),
         payee,
         category,
-        memo: input.memo.unwrap_or_else(|| t.memo.clone()),
+        memo: input.memo.applied_to(t.memo.as_ref()),
         cleared: input.cleared.unwrap_or(t.cleared),
         approved: input.approved.unwrap_or(t.approved),
-        flag_color: input.flag_color.unwrap_or(t.flag_color),
+        flag_color: input.flag_color.applied_to(t.flag_color.as_ref()),
         subs,
     };
     let transfer = validate(plan, account, &d)?;
@@ -554,7 +550,7 @@ pub async fn update(
                 .transactions
                 .get_mut(id)
                 .expect("a transfer's other half exists");
-            partner.date = t.date.clone();
+            partner.date.clone_from(&t.date);
             partner.amount = -t.amount;
             partner.category_id = other_category;
         } else if let Some(mut half) = new_half {

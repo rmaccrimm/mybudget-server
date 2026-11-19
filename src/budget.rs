@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Serialize;
 
 use crate::calendar::Month;
-use crate::model::{Plan, READY_TO_ASSIGN};
+use crate::model::{Plan, READY_TO_ASSIGN, Transaction};
 
 /// A category's figures for one month (SPEC 11.3).
 #[derive(Serialize)]
@@ -98,9 +98,19 @@ pub struct Budget<'a> {
     cash_advances: BTreeMap<Month, i64>,
 }
 
-impl<'a> Budget<'a> {
-    pub fn new(plan: &'a Plan) -> Self {
-        let mut raw: HashMap<&str, BTreeMap<Month, Raw>> = plan
+/// A plan's lines, gathered by category and month (SPEC 11.1, 12.5).
+struct Lines<'a> {
+    /// Per user category id, its raw figures by month.
+    raw: HashMap<&'a str, BTreeMap<Month, Raw>>,
+    /// Payment categories' activity, by account index and month.
+    payment_activity: HashMap<usize, BTreeMap<Month, i64>>,
+    income: BTreeMap<Month, i64>,
+    cash_advances: BTreeMap<Month, i64>,
+}
+
+impl<'a> Lines<'a> {
+    fn gather(plan: &'a Plan) -> Self {
+        let raw = plan
             .categories
             .values()
             .filter(|c| c.payment_account_id.is_none())
@@ -111,77 +121,85 @@ impl<'a> Budget<'a> {
                 )
             })
             .collect();
-
-        // Payment categories' activity, by account index and month.
-        let mut payment_activity: HashMap<usize, BTreeMap<Month, i64>> = HashMap::new();
-        let mut income = BTreeMap::new();
-        let mut cash_advances = BTreeMap::new();
-
+        let mut lines = Self {
+            raw,
+            payment_activity: HashMap::new(),
+            income: BTreeMap::new(),
+            cash_advances: BTreeMap::new(),
+        };
         for t in plan.transactions.values() {
-            // Accounts are numbered by creation order, the order credit
-            // funding follows.
-            let (ai, _, account) = plan
+            lines.add(plan, t);
+        }
+        lines
+    }
+
+    fn add(&mut self, plan: &Plan, t: &Transaction) {
+        // Accounts are numbered by creation order, the order credit
+        // funding follows.
+        let (ai, _, account) = plan
+            .accounts
+            .get_full(&t.account_id)
+            .expect("a transaction's account exists");
+        let kind = account.kind;
+        // Lines (SPEC 11.1): tracking accounts never affect the plan.
+        if !kind.on_budget() {
+            return;
+        }
+        let month = Month::of_date(&t.date);
+        // A transfer between a cash and a credit account: the credit
+        // half decides what happens (SPEC 12.5).
+        if kind.is_credit()
+            && let Some(other) = &t.transfer_account_id
+            && plan
                 .accounts
-                .get_full(&t.account_id)
-                .expect("a transaction's account exists");
-            let kind = account.kind;
-            // Lines (SPEC 11.1): tracking accounts never affect the plan.
-            if !kind.on_budget() {
-                continue;
-            }
-            let month = Month::of_date(&t.date);
-            // A transfer between a cash and a credit account: the credit
-            // half decides what happens (SPEC 12.5).
-            if kind.is_credit()
-                && let Some(other) = &t.transfer_account_id
-                && plan
-                    .accounts
-                    .get(other)
-                    .expect("a transfer's other account exists")
-                    .kind
-                    .is_cash()
-            {
-                if t.amount > 0 {
-                    *payment_activity
-                        .entry(ai)
-                        .or_default()
-                        .entry(month)
-                        .or_insert(0) -= t.amount;
-                } else {
-                    *cash_advances.entry(month).or_insert(0) -= t.amount;
-                }
-            }
-            let mut line = |category: &str, amount: i64| {
-                if category == READY_TO_ASSIGN {
-                    // In a credit account it changes nothing (SPEC 12.6).
-                    if kind.is_cash() {
-                        *income.entry(month).or_insert(0) += amount;
-                    }
-                } else if let Some(map) = raw.get_mut(category) {
-                    let r = map.entry(month).or_default();
-                    if kind.is_credit() {
-                        *r.credit.entry(ai).or_insert(0) += amount;
-                    } else {
-                        r.cash += amount;
-                    }
-                }
-            };
-            if t.subtransactions.is_empty() {
-                if let Some(c) = &t.category_id {
-                    line(c, t.amount);
-                }
+                .get(other)
+                .expect("a transfer's other account exists")
+                .kind
+                .is_cash()
+        {
+            if t.amount > 0 {
+                *self
+                    .payment_activity
+                    .entry(ai)
+                    .or_default()
+                    .entry(month)
+                    .or_insert(0) -= t.amount;
             } else {
-                for s in &t.subtransactions {
-                    line(&s.category_id, s.amount);
-                }
+                *self.cash_advances.entry(month).or_insert(0) -= t.amount;
             }
         }
+        let mut line = |category: &str, amount: i64| {
+            if category == READY_TO_ASSIGN {
+                // In a credit account it changes nothing (SPEC 12.6).
+                if kind.is_cash() {
+                    *self.income.entry(month).or_insert(0) += amount;
+                }
+            } else if let Some(map) = self.raw.get_mut(category) {
+                let r = map.entry(month).or_default();
+                if kind.is_credit() {
+                    *r.credit.entry(ai).or_insert(0) += amount;
+                } else {
+                    r.cash += amount;
+                }
+            }
+        };
+        if t.subtransactions.is_empty() {
+            if let Some(c) = &t.category_id {
+                line(c, t.amount);
+            }
+        } else {
+            for s in &t.subtransactions {
+                line(&s.category_id, s.amount);
+            }
+        }
+    }
 
-        // Settle each user category month by month, funding its credit
-        // spending from what it holds (SPEC 12.2, 12.3), and pass the
-        // funded amounts and refunds on to the payment categories (12.4).
-        let mut cells: HashMap<&str, BTreeMap<Month, Cell>> = HashMap::new();
-        for (&cid, months) in &raw {
+    /// Settles each user category month by month, funding its credit
+    /// spending from what it holds (SPEC 12.2, 12.3), and passes the
+    /// funded amounts and refunds on to the payment categories (12.4).
+    fn settle(&mut self) -> HashMap<&'a str, BTreeMap<Month, Cell>> {
+        let mut cells = HashMap::new();
+        for (&cid, months) in &self.raw {
             let mut out = BTreeMap::new();
             let mut available = 0i64;
             for (&m, r) in months {
@@ -195,7 +213,8 @@ impl<'a> Budget<'a> {
                     left -= take;
                     let delta = take - net.max(0);
                     if delta != 0 {
-                        *payment_activity
+                        *self
+                            .payment_activity
                             .entry(ai)
                             .or_default()
                             .entry(m)
@@ -213,6 +232,14 @@ impl<'a> Budget<'a> {
             }
             cells.insert(cid, out);
         }
+        cells
+    }
+}
+
+impl<'a> Budget<'a> {
+    pub fn new(plan: &'a Plan) -> Self {
+        let mut lines = Lines::gather(plan);
+        let mut cells = lines.settle();
 
         // Payment categories (SPEC 12.1, 12.4).
         for c in plan.categories.values() {
@@ -224,7 +251,7 @@ impl<'a> Budget<'a> {
                 .accounts
                 .get_index_of(account_id)
                 .expect("a payment category's account exists");
-            for (&m, &a) in payment_activity.get(&ai).into_iter().flatten() {
+            for (&m, &a) in lines.payment_activity.get(&ai).into_iter().flatten() {
                 map.entry(m).or_default().activity += a;
             }
             cells.insert(c.id.as_str(), map);
@@ -233,8 +260,8 @@ impl<'a> Budget<'a> {
         Self {
             plan,
             cells,
-            income,
-            cash_advances,
+            income: lines.income,
+            cash_advances: lines.cash_advances,
         }
     }
 

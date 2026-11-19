@@ -47,7 +47,7 @@ pub async fn create(
     let body = Body::parse(&body)?;
     let name = body.required("name", fields::name)?;
     let kind = body.required("type", fields::variant)?;
-    let note = body.optional("note", fields::note)?.flatten();
+    let note = body.nullable("note", fields::note)?.or_null();
     let starting_balance = body
         .optional("starting_balance", fields::amount)?
         .unwrap_or(0);
@@ -80,7 +80,7 @@ pub async fn update(
     let account = plan.accounts.by_id(&account_id)?;
     let body = Body::parse(&body)?;
     let name = body.optional("name", fields::name)?;
-    let note = body.optional("note", fields::note)?;
+    let note = body.nullable("note", fields::note)?;
     let closed = body.optional("closed", fields::boolean)?;
     if body
         .optional("type", fields::variant::<AccountType>)?
@@ -96,9 +96,7 @@ pub async fn update(
 
     let view = store.change_plan(&plan_id, |plan| {
         let account = plan.accounts.get_mut(&account_id).expect("found above");
-        if let Some(note) = note {
-            account.note = note;
-        }
+        note.apply_to(&mut account.note);
         if let Some(closed) = closed {
             account.closed = closed;
         }

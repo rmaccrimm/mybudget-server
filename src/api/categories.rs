@@ -126,7 +126,7 @@ pub async fn create(
     let body = Body::parse(&body)?;
     let group = own_group(plan, &body.required("group_id", fields::string)?)?;
     let name = body.required("name", fields::name)?;
-    let note = body.optional("note", fields::note)?.flatten();
+    let note = body.nullable("note", fields::note)?.or_null();
     let category = Category {
         id: new_id(),
         group_id: group.id.clone(),
@@ -166,7 +166,7 @@ pub async fn update(
     let mut category = plan.categories.by_id(&category_id)?.clone();
     let body = Body::parse(&body)?;
     let name = body.optional("name", fields::name)?;
-    let note = body.optional("note", fields::note)?;
+    let note = body.nullable("note", fields::note)?;
     let hidden = body.optional("hidden", fields::boolean)?;
     let group_id = body.optional("group_id", fields::string)?;
     if category.payment_account_id.is_some() && (name.is_some() || group_id.is_some()) {
@@ -177,7 +177,7 @@ pub async fn update(
     // Naming the category's own group doesn't move it.
     let moved = match group_id {
         Some(id) if id != category.group_id => {
-            category.group_id = own_group(plan, &id)?.id.clone();
+            category.group_id.clone_from(&own_group(plan, &id)?.id);
             true
         }
         _ => false,
@@ -185,9 +185,7 @@ pub async fn update(
     if let Some(name) = name {
         category.name = name;
     }
-    if let Some(note) = note {
-        category.note = note;
-    }
+    note.apply_to(&mut category.note);
     if let Some(hidden) = hidden {
         category.hidden = hidden;
     }

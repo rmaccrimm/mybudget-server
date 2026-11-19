@@ -56,22 +56,83 @@ impl Body {
     ) -> Result<Option<T>, ApiError> {
         self.0.get(key).map(|v| check(key, v)).transpose()
     }
+
+    /// A nullable field (SPEC 3.10): left out, `null`, or a value that must
+    /// pass `check`.
+    pub fn nullable<'a, T>(
+        &'a self,
+        key: &str,
+        check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
+    ) -> Result<Patch<T>, ApiError> {
+        Ok(match self.0.get(key) {
+            None => Patch::Absent,
+            Some(Json::Null) => Patch::Null,
+            Some(v) => Patch::Set(check(key, v)?),
+        })
+    }
+
+    /// A nullable field that must be present, though it may be `null`.
+    pub fn required_nullable<'a, T>(
+        &'a self,
+        key: &str,
+        check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
+    ) -> Result<Option<T>, ApiError> {
+        match self.nullable(key, check)? {
+            Patch::Absent => Err(missing(key)),
+            Patch::Null => Ok(None),
+            Patch::Set(value) => Ok(Some(value)),
+        }
+    }
+}
+
+/// What a body says about a nullable field (SPEC 3.10).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Patch<T> {
+    /// The body leaves the field out.
+    Absent,
+    /// The body sets the field to `null`.
+    Null,
+    /// The body sets the field to a value.
+    Set(T),
+}
+
+impl<T> Patch<T> {
+    /// The field's value when leaving it out means `null`, as on a new
+    /// object.
+    pub fn or_null(self) -> Option<T> {
+        match self {
+            Self::Absent | Self::Null => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+
+    /// The field's value after the body is applied to `current`: unchanged
+    /// if the body leaves the field out.
+    pub fn applied_to(self, current: Option<&T>) -> Option<T>
+    where
+        T: Clone,
+    {
+        match self {
+            Self::Absent => current.cloned(),
+            Self::Null => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+
+    /// Applies the body to `field`, leaving it as it is if the body leaves
+    /// the field out.
+    pub fn apply_to(self, field: &mut Option<T>) {
+        match self {
+            Self::Absent => {}
+            Self::Null => *field = None,
+            Self::Set(value) => *field = Some(value),
+        }
+    }
 }
 
 /// The error for a required field that isn't there.
 pub fn missing(key: &str) -> ApiError {
     ApiError::bad_request(format!("{key} is required"))
-}
-
-/// A nullable field (SPEC 3.10): `null` is `None`, and anything else must
-/// pass `check`.
-pub fn nullable<'a, T>(
-    check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
-) -> impl FnOnce(&str, &'a Json) -> Result<Option<T>, ApiError> {
-    move |field, v| match v {
-        Json::Null => Ok(None),
-        _ => check(field, v).map(Some),
-    }
 }
 
 pub fn string(field: &str, v: &Json) -> Result<String, ApiError> {
@@ -116,19 +177,15 @@ pub fn payee_name(field: &str, v: &Json) -> Result<String, ApiError> {
     name_of_length(field, v, MAX_PAYEE_NAME)
 }
 
-/// The text of a note or memo: at most 500 scalar values (SPEC 3.9).
-fn note_text(field: &str, v: &Json) -> Result<String, ApiError> {
+/// The text of a note or memo, which is nullable: at most 500 scalar values
+/// (SPEC 3.9).
+pub fn note(field: &str, v: &Json) -> Result<String, ApiError> {
     match v {
         Json::String(s) if s.chars().count() <= MAX_NOTE => Ok(s.clone()),
         _ => Err(ApiError::bad_request(format!(
             "{field} must be null or a string of at most {MAX_NOTE} characters"
         ))),
     }
-}
-
-/// A note or memo: `null` or its text (SPEC 3.9).
-pub fn note(field: &str, v: &Json) -> Result<Option<String>, ApiError> {
-    nullable(note_text)(field, v)
 }
 
 pub fn boolean(field: &str, v: &Json) -> Result<bool, ApiError> {
@@ -219,13 +276,27 @@ mod tests {
         let err = variant::<AccountType>("type", &s("credit_card")).unwrap_err();
         assert!(err.message.contains("lineOfCredit"), "{}", err.message);
         assert!(variant::<AccountType>("type", &Json::Null).is_err());
+    }
+
+    #[test]
+    fn nullable_fields() {
+        let body = Body::parse(br#"{"flag_color": "red", "memo": null}"#).unwrap();
         assert_eq!(
-            nullable(variant)("flag_color", &Json::Null).unwrap(),
-            None::<FlagColor>
+            body.nullable("flag_color", variant).unwrap(),
+            Patch::Set(FlagColor::Red)
         );
-        assert_eq!(
-            nullable(variant)("flag_color", &s("red")).unwrap(),
-            Some(FlagColor::Red)
-        );
+        assert_eq!(body.nullable("memo", note).unwrap(), Patch::Null);
+        assert_eq!(body.nullable("payee_id", string).unwrap(), Patch::Absent);
+        assert!(body.nullable("flag_color", boolean).is_err());
+        assert_eq!(body.required_nullable("memo", note).unwrap(), None);
+        assert!(body.required_nullable("payee_id", string).is_err());
+
+        let current = Some(FlagColor::Blue);
+        assert_eq!(Patch::Absent.applied_to(current.as_ref()), current);
+        assert_eq!(Patch::Null.applied_to(current.as_ref()), None);
+        assert_eq!(Patch::Absent::<FlagColor>.or_null(), None);
+        let mut field = current;
+        Patch::Set(FlagColor::Red).apply_to(&mut field);
+        assert_eq!(field, Some(FlagColor::Red));
     }
 }

@@ -233,7 +233,7 @@ impl Transaction {
             .iter_mut()
             .filter(|s| s.category_id == from)
         {
-            s.category_id = to.to_owned();
+            to.clone_into(&mut s.category_id);
         }
     }
 }
@@ -414,7 +414,7 @@ impl Plan {
                 .categories
                 .get_mut(category_id)
                 .expect("an account's payment category exists");
-            category.name = name.clone();
+            category.name.clone_from(&name);
         }
         account.name = name;
     }

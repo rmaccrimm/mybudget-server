@@ -484,7 +484,19 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
 /// that a file edited by hand is skipped (SPEC 15.7) rather than served with
 /// links that lead nowhere.
 fn check_links(plan: &Plan) -> Result<(), String> {
-    let ensure = |ok: bool, problem: &str| if ok { Ok(()) } else { Err(problem.to_owned()) };
+    check_groups(plan)?;
+    check_accounts(plan)?;
+    check_payees(plan)?;
+    check_categories(plan)?;
+    check_transactions(plan)
+}
+
+/// `Ok` if `ok`, and otherwise the error naming `problem`.
+fn ensure(ok: bool, problem: &str) -> Result<(), String> {
+    if ok { Ok(()) } else { Err(problem.to_owned()) }
+}
+
+fn check_groups(plan: &Plan) -> Result<(), String> {
     let mut groups = plan.groups.values();
     ensure(
         groups.next().is_some_and(|g| g.internal),
@@ -493,7 +505,10 @@ fn check_links(plan: &Plan) -> Result<(), String> {
     ensure(
         groups.all(|g| !g.internal),
         "only one category group may be internal",
-    )?;
+    )
+}
+
+fn check_accounts(plan: &Plan) -> Result<(), String> {
     for a in plan.accounts.values() {
         let payee = plan.payees.get(&a.transfer_payee_id);
         ensure(
@@ -515,6 +530,10 @@ fn check_links(plan: &Plan) -> Result<(), String> {
             "a credit account's payment category is missing",
         )?;
     }
+    Ok(())
+}
+
+fn check_payees(plan: &Plan) -> Result<(), String> {
     for p in plan.payees.values() {
         let account = p
             .transfer_account_id
@@ -525,6 +544,10 @@ fn check_links(plan: &Plan) -> Result<(), String> {
             "a transfer payee's account is missing",
         )?;
     }
+    Ok(())
+}
+
+fn check_categories(plan: &Plan) -> Result<(), String> {
     for c in plan.categories.values() {
         let group = plan
             .groups
@@ -544,6 +567,10 @@ fn check_links(plan: &Plan) -> Result<(), String> {
             "a payment category's account is missing",
         )?;
     }
+    Ok(())
+}
+
+fn check_transactions(plan: &Plan) -> Result<(), String> {
     let category_exists = |id: &str| id == READY_TO_ASSIGN || plan.categories.contains_key(id);
     for t in plan.transactions.values() {
         ensure(
@@ -718,13 +745,13 @@ mod tests {
         }
         plan.delete_category(&c, Some(&d));
         plan.transactions.shift_remove(&early);
-        let t = plan.transactions.get_mut(&split).unwrap();
-        t.subtransactions = vec![
+        let edited = plan.transactions.get_mut(&split).unwrap();
+        edited.subtransactions = vec![
             line(-1, &d, None),
             line(-2, &d, None),
             line(-4, &b, Some("y")),
         ];
-        t.amount = -7;
+        edited.amount = -7;
         add_transaction(&mut plan, &checking, vec![]);
         let unused = plan.payee_by_name("Unused");
         plan.assigned.remove(&a);
