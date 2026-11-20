@@ -150,68 +150,216 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // ---------------------------------------------------------------------------
 // Elements (SPEC 17.3)
 
-/// An element: its name in uppercase, its value, and the elements it holds,
-/// in order.
-#[derive(Debug, Default)]
+/// The elements of a file, in the order their start tags appear, the first
+/// being the root, which holds the top-level elements. Elements refer to the
+/// ones they hold by index, so that however deeply a file nests them, nothing
+/// that reads, searches or drops the tree recurses.
+struct Tree {
+    elements: Vec<Element>,
+}
+
+/// An element: its name in uppercase, its value, and the indexes of the
+/// elements it holds, in order.
+#[derive(Default)]
 struct Element {
     name: String,
     /// Absent if empty.
     value: Option<String>,
-    children: Vec<Element>,
+    children: Vec<usize>,
 }
 
-impl Element {
-    fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
-        self.children.iter().filter(move |c| c.name == name)
+impl Tree {
+    /// The root, which tests read from; statements are found among all
+    /// elements, wherever they are.
+    #[cfg(test)]
+    fn root(&self) -> Node<'_> {
+        self.node(0)
+    }
+
+    fn node(&self, index: usize) -> Node<'_> {
+        Node { tree: self, index }
+    }
+
+    /// Every element, in the order their start tags appear.
+    fn nodes(&self) -> impl Iterator<Item = Node<'_>> {
+        (0..self.elements.len()).map(|i| self.node(i))
+    }
+}
+
+/// An element of a tree, to read it and the elements it holds.
+#[derive(Clone, Copy)]
+struct Node<'a> {
+    tree: &'a Tree,
+    index: usize,
+}
+
+impl<'a> Node<'a> {
+    fn element(self) -> &'a Element {
+        &self.tree.elements[self.index]
+    }
+
+    fn name(self) -> &'a str {
+        &self.element().name
+    }
+
+    fn value(self) -> Option<&'a str> {
+        self.element().value.as_deref()
+    }
+
+    fn holds_elements(self) -> bool {
+        !self.element().children.is_empty()
+    }
+
+    fn children(self) -> impl Iterator<Item = Node<'a>> {
+        self.element().children.iter().map(|&i| self.tree.node(i))
+    }
+
+    fn children_named(self, name: &'a str) -> impl Iterator<Item = Node<'a>> {
+        self.children().filter(move |c| c.name() == name)
     }
 
     /// Of the elements named `name` it holds directly, the first that holds
     /// other elements: SPEC 17.3's first that isn't absent, for an element
     /// whose elements SPEC 17.4 reads.
-    fn child<'a>(&'a self, name: &'a str) -> Option<&'a Element> {
-        self.children_named(name).find(|c| !c.children.is_empty())
+    fn child(self, name: &'a str) -> Option<Node<'a>> {
+        self.children_named(name).find(|c| c.holds_elements())
     }
 
     /// Of the values of the elements named `name` it holds directly, the
     /// first that isn't absent (SPEC 17.3).
-    fn value_of<'a>(&'a self, name: &'a str) -> Option<&'a str> {
-        self.children_named(name).find_map(|c| c.value.as_deref())
+    fn value_of(self, name: &'a str) -> Option<&'a str> {
+        self.children_named(name).find_map(Node::value)
     }
 }
 
-/// An element still open while the text is read.
-#[derive(Default)]
+/// What [`parse`] keeps while it reads the text.
+///
+/// An element with no end tag holds only the text up to its first tag; what
+/// comes after that, text and elements, belongs to its parent (SPEC 17.3).
+/// Whether an element has an end tag is only known once its parent closes,
+/// so the elements and text read inside the open elements are kept in two
+/// lists shared by all of them, each open element's being the end of each
+/// list from where it starts. Closing an element without an end tag then
+/// leaves what came after its first tag in place, for its parent, without
+/// moving it.
+struct Parser<'a> {
+    elements: Vec<Element>,
+    /// The open elements, the root first.
+    open: Vec<Open>,
+    /// The indexes of the elements started inside the open elements, in
+    /// order, that no closed element holds yet.
+    children: Vec<usize>,
+    /// The text read inside the open elements, in pieces: `None` once a
+    /// value holds it.
+    text: Vec<Option<&'a str>>,
+}
+
+/// An open element, and where what it holds starts in [`Parser`]'s lists.
 struct Open {
-    name: String,
-    /// The text up to the first tag after its start tag: all it holds if it
-    /// turns out to have no end tag.
-    head: String,
-    /// Whether a tag has come since its start tag.
-    head_done: bool,
-    /// The text it holds directly after `head`.
-    tail: String,
-    children: Vec<Element>,
+    index: usize,
+    children: usize,
+    text: usize,
+    /// Where the text up to its first tag ends, once a tag has come.
+    head: Option<usize>,
 }
 
-impl Open {
-    fn push_text(&mut self, text: &str) {
-        if self.head_done {
-            self.tail.push_str(text);
-        } else {
-            self.head.push_str(text);
+impl<'a> Parser<'a> {
+    fn new() -> Self {
+        let root = Open {
+            index: 0,
+            children: 0,
+            text: 0,
+            head: None,
+        };
+        Parser {
+            elements: vec![Element::default()],
+            open: vec![root],
+            children: Vec::new(),
+            text: Vec::new(),
         }
     }
 
-    /// The element, closed by its own end tag: it holds everything since its
-    /// start tag.
-    fn closed(mut self) -> Element {
-        self.head.push_str(&self.tail);
-        Element {
-            name: self.name,
-            value: value(&self.head),
-            children: self.children,
+    fn text(&mut self, text: &'a str) {
+        self.text.push(Some(text));
+    }
+
+    fn start(&mut self, name: &str) {
+        self.end_head();
+        let index = self.elements.len();
+        self.elements.push(Element {
+            name: name.to_ascii_uppercase(),
+            ..Element::default()
+        });
+        self.children.push(index);
+        self.open.push(Open {
+            index,
+            children: self.children.len(),
+            text: self.text.len(),
+            head: None,
+        });
+    }
+
+    fn end(&mut self, name: &str) -> Result<(), String> {
+        self.end_head();
+        let depth = self
+            .open
+            .iter()
+            .rposition(|o| self.elements[o.index].name.eq_ignore_ascii_case(name))
+            .filter(|&depth| depth > 0)
+            .ok_or_else(|| format!("the end tag </{name}> closes no open element"))?;
+        while self.open.len() > depth + 1 {
+            self.close_unended();
+        }
+        self.close();
+        Ok(())
+    }
+
+    /// Closes what is still open at the end of the text, and returns the tree.
+    fn finish(mut self) -> Tree {
+        while self.open.len() > 1 {
+            self.close_unended();
+        }
+        self.close();
+        Tree {
+            elements: self.elements,
         }
     }
+
+    /// A tag ends the text the innermost open element holds if it turns out
+    /// to have no end tag.
+    fn end_head(&mut self) {
+        let len = self.text.len();
+        let top = self.open.last_mut().expect("the root stays open");
+        top.head.get_or_insert(len);
+    }
+
+    /// Closes the innermost open element, which has no end tag of its own:
+    /// it holds only the text up to its first tag.
+    fn close_unended(&mut self) {
+        let open = self.open.pop().expect("the caller leaves the root");
+        let head = open.head.unwrap_or(self.text.len());
+        self.elements[open.index].value = take_value(&mut self.text[open.text..head]);
+    }
+
+    /// Closes the innermost open element, by its end tag: it holds all that
+    /// no element inside it holds.
+    fn close(&mut self) {
+        let open = self.open.pop().expect("the caller closes an open element");
+        let element = &mut self.elements[open.index];
+        element.value = take_value(&mut self.text[open.text..]);
+        element.children = self.children.drain(open.children..).collect();
+        self.text.truncate(open.text);
+    }
+}
+
+/// The value of the pieces of text no value holds yet, which it takes.
+fn take_value(pieces: &mut [Option<&str>]) -> Option<String> {
+    value(
+        &pieces
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect::<String>(),
+    )
 }
 
 /// A piece of markup or text.
@@ -266,56 +414,16 @@ fn tokens(mut text: &str) -> impl Iterator<Item = Token<'_>> {
 }
 
 /// Reads the text into the elements it holds.
-fn parse(text: &str) -> Result<Element, String> {
-    // The root, which holds the top-level elements, is never closed by a tag.
-    let mut stack = vec![Open::default()];
+fn parse(text: &str) -> Result<Tree, String> {
+    let mut parser = Parser::new();
     for token in tokens(text) {
         match token {
-            Token::Text(t) => top(&mut stack).push_text(t),
-            Token::Start(name) => {
-                top(&mut stack).head_done = true;
-                stack.push(Open {
-                    name: name.to_ascii_uppercase(),
-                    ..Open::default()
-                });
-            }
-            Token::End(name) => {
-                top(&mut stack).head_done = true;
-                let index = stack
-                    .iter()
-                    .rposition(|o| o.name.eq_ignore_ascii_case(name))
-                    .filter(|&i| i > 0)
-                    .ok_or_else(|| format!("the end tag </{name}> closes no open element"))?;
-                while stack.len() > index + 1 {
-                    close_unended(&mut stack);
-                }
-                let element = stack.pop().expect("the index is on the stack").closed();
-                top(&mut stack).children.push(element);
-            }
+            Token::Text(text) => parser.text(text),
+            Token::Start(name) => parser.start(name),
+            Token::End(name) => parser.end(name)?,
         }
     }
-    while stack.len() > 1 {
-        close_unended(&mut stack);
-    }
-    Ok(stack.pop().expect("the root stays on the stack").closed())
-}
-
-fn top(stack: &mut [Open]) -> &mut Open {
-    stack.last_mut().expect("the root stays on the stack")
-}
-
-/// Closes the innermost open element, which has no end tag of its own: it
-/// holds only its `head`, and what came after that belongs to its parent.
-fn close_unended(stack: &mut Vec<Open>) {
-    let open = stack.pop().expect("the caller leaves the root");
-    let parent = top(stack);
-    parent.children.push(Element {
-        name: open.name,
-        value: value(&open.head),
-        children: Vec::new(),
-    });
-    parent.children.extend(open.children);
-    parent.tail.push_str(&open.tail);
+    Ok(parser.finish())
 }
 
 /// The value of an element's text: references replaced, then white space
@@ -333,13 +441,22 @@ fn replace_references(text: &str) -> String {
     let mut rest = text;
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
-        rest = &rest[amp..];
-        let reference = rest[1..]
-            .find(';')
-            .and_then(|semi| Some((reference(&rest[1..=semi])?, semi + 2)));
-        let (c, len) = reference.unwrap_or(('&', 1));
-        out.push(c);
-        rest = &rest[len..];
+        rest = &rest[amp + 1..];
+        // A reference's name is letters, digits and `#`, so the search for
+        // its `;` stops at anything else, which keeps this linear.
+        let len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
+            .unwrap_or(rest.len());
+        let reference = rest[len..]
+            .starts_with(';')
+            .then(|| reference(&rest[..len]))
+            .flatten();
+        if let Some(c) = reference {
+            out.push(c);
+            rest = &rest[len + 1..];
+        } else {
+            out.push('&');
+        }
     }
     out.push_str(rest);
     out
@@ -371,29 +488,21 @@ fn reference(name: &str) -> Option<char> {
 // ---------------------------------------------------------------------------
 // Statements (SPEC 17.4, 17.5)
 
-/// The statements in the tree, in the order they appear.
-fn statements(root: &Element) -> Result<Vec<Statement>, String> {
-    let mut found = Vec::new();
-    find_statements(root, &mut found);
+/// The statements in the tree, wherever they are, even inside other
+/// statements, in the order their start tags appear (SPEC 17.4).
+fn statements(tree: &Tree) -> Result<Vec<Statement>, String> {
+    let found: Vec<_> = tree
+        .nodes()
+        .filter(|n| matches!(n.name(), "STMTRS" | "CCSTMTRS"))
+        .collect();
     if found.is_empty() {
         return Err("the file holds no statements".into());
     }
     found.into_iter().map(statement).collect()
 }
 
-/// Statements are found wherever they are, even inside other statements, in
-/// the order their start tags appear (SPEC 17.4).
-fn find_statements<'a>(element: &'a Element, found: &mut Vec<&'a Element>) {
-    for child in &element.children {
-        if matches!(child.name.as_str(), "STMTRS" | "CCSTMTRS") {
-            found.push(child);
-        }
-        find_statements(child, found);
-    }
-}
-
-fn statement(s: &Element) -> Result<Statement, String> {
-    let (kind, account_tag) = if s.name == "STMTRS" {
+fn statement(s: Node) -> Result<Statement, String> {
+    let (kind, account_tag) = if s.name() == "STMTRS" {
         (StatementType::Bank, "BANKACCTFROM")
     } else {
         (StatementType::CreditCard, "CCACCTFROM")
@@ -422,7 +531,7 @@ fn statement(s: &Element) -> Result<Statement, String> {
     })
 }
 
-fn transaction(t: &Element) -> Result<BankTransaction, String> {
+fn transaction(t: Node) -> Result<BankTransaction, String> {
     let text = |name| t.value_of(name).map(str::to_owned);
     Ok(BankTransaction {
         fitid: text("FITID"),
@@ -554,39 +663,84 @@ mod tests {
         }
     }
 
-    fn tree(text: &str) -> Element {
+    fn read_tree(text: &str) -> Tree {
         parse(text).unwrap()
+    }
+
+    fn names(node: Node<'_>) -> Vec<&str> {
+        node.children().map(Node::name).collect()
     }
 
     #[test]
     fn values() {
-        let root = tree("<A>AB<!-- x -->CD<?pi?>E<B>&lt;AT&T&#38;&#x26;&nbsp;&bogus;</B>");
-        let a = &root.children[0];
-        assert_eq!(a.value.as_deref(), Some("ABCDE"));
-        assert_eq!(root.value_of("B"), Some("<AT&T&&\u{A0}&bogus;"));
-        assert_eq!(tree("<X>  \n</X>").children[0].value, None);
+        let tree = read_tree("<A>AB<!-- x -->CD<?pi?>E<B>&lt;AT&T&#38;&#x26;&nbsp;&bogus;&#;&</B>");
+        let root = tree.root();
+        assert_eq!(root.value_of("A"), Some("ABCDE"));
+        assert_eq!(root.value_of("B"), Some("<AT&T&&\u{A0}&bogus;&#;&"));
+        assert_eq!(read_tree("<X>  \n</X>").root().value_of("X"), None);
     }
 
     #[test]
     fn elements_without_end_tags() {
-        let root = tree("<S><T>DEBIT<D>2026<AMT>-1</S><n>x</N>");
-        let s = root.child("S").unwrap();
-        let names: Vec<_> = s.children.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["T", "D", "AMT"]);
+        let tree = read_tree("<S><T>DEBIT<D>2026<AMT>-1</S><n>x</N>");
+        let s = tree.root().child("S").unwrap();
+        assert_eq!(names(s), ["T", "D", "AMT"]);
         assert_eq!(s.value_of("T"), Some("DEBIT"));
         assert_eq!(s.value_of("AMT"), Some("-1"));
-        assert_eq!(root.value_of("N"), Some("x"));
+        assert_eq!(tree.root().value_of("N"), Some("x"));
         assert!(parse("<A></B>").is_err());
         assert!(parse("</A>").is_err());
     }
 
     #[test]
+    fn text_after_an_element_without_end_tag_belongs_to_its_parent() {
+        let tree = read_tree("<A>x<B>y<C>z</C>w<D>v</A>");
+        let a = tree.root().child("A").unwrap();
+        assert_eq!(names(a), ["B", "C", "D"]);
+        assert_eq!(a.value(), Some("xw"));
+        assert_eq!(a.value_of("B"), Some("y"));
+        assert_eq!(a.value_of("C"), Some("z"));
+        assert_eq!(a.value_of("D"), Some("v"));
+        let tree = read_tree("<A>x<B>y<C>z");
+        assert_eq!(names(tree.root()), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn deep_nesting_reads_in_linear_time() {
+        let unended = "<A>".repeat(200_000);
+        assert_eq!(read_tree(&unended).elements.len(), 200_001);
+        let nested = "<A>".repeat(200_000) + &"</A>".repeat(200_000);
+        let tree = read_tree(&nested);
+        assert_eq!(tree.root().children().count(), 1);
+        drop(tree);
+        assert_eq!(value(&"&".repeat(200_000)).unwrap().len(), 200_000);
+    }
+
+    #[test]
     fn first_present_element_counts() {
-        let root = tree("<A><N></N><N><X>x</X></N><N>one</N><N>two</N></A>");
-        assert_eq!(root.child("A").unwrap().value_of("N"), Some("one"));
-        let root = tree("<R><L>text</L><L><B>1</B></L></R>");
-        let l = root.child("R").unwrap().child("L").unwrap();
+        let tree = read_tree("<A><N></N><N><X>x</X></N><N>one</N><N>two</N></A>");
+        assert_eq!(tree.root().child("A").unwrap().value_of("N"), Some("one"));
+        let tree = read_tree("<R><L>text</L><L><B>1</B></L></R>");
+        let l = tree.root().child("R").unwrap().child("L").unwrap();
         assert_eq!(l.value_of("B"), Some("1"));
+    }
+
+    #[test]
+    fn statements_and_transactions_are_never_absent() {
+        let account = "<BANKACCTFROM><ACCTID>1</BANKACCTFROM>";
+        for bad in [
+            format!("<STMTRS></STMTRS><STMTRS>{account}</STMTRS>"),
+            format!("<STMTRS>text</STMTRS><STMTRS>{account}</STMTRS>"),
+            format!("<STMTRS>{account}<BANKTRANLIST><STMTTRN>x</STMTTRN></BANKTRANLIST></STMTRS>"),
+        ] {
+            assert!(statements(&read_tree(&bad)).is_err(), "{bad}");
+        }
+        let ignored_child = format!(
+            "<STMTRS>{account}<LEDGERBAL><XFOO>1</XFOO></LEDGERBAL>\
+             <LEDGERBAL><BALAMT>5</LEDGERBAL></STMTRS>"
+        );
+        let found = statements(&read_tree(&ignored_child)).unwrap();
+        assert_eq!(found[0].ledger_balance, None);
     }
 
     #[test]
@@ -596,7 +750,7 @@ mod tests {
             <NAME>A<MEMO>inner</MEMO></NAME></STMTTRN></BANKTRANLIST>\
             <X><CCSTMTRS><CCACCTFROM><ACCTID>2</CCACCTFROM></CCSTMTRS></X>\
             </STMTRS>";
-        let found = statements(&tree(file)).unwrap();
+        let found = statements(&read_tree(file)).unwrap();
         let numbers: Vec<_> = found.iter().map(|s| s.account_number.as_str()).collect();
         assert_eq!(numbers, ["1", "2"]);
         let t = &found[0].transactions[0];
