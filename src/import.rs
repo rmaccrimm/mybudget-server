@@ -111,6 +111,15 @@ fn bank_data(t: &BankTransaction, import_id: String, options: &ImportOptions) ->
     }
 }
 
+/// What an import keeps track of across its statements (SPEC 17.9).
+struct Progress {
+    /// Transactions imported or matched before the import began that no bank
+    /// transaction in it duplicates yet: the second check's candidates.
+    unpaired: HashSet<String>,
+    /// The import ids of the import's bank transactions so far, by account.
+    seen: HashMap<String, HashSet<String>>,
+}
+
 /// What happens to a bank transaction (SPEC 17.7).
 enum Outcome {
     /// Its import id is one the account has had (SPEC 17.9's first check).
@@ -148,19 +157,20 @@ impl Plan {
         statements: &[Statement],
         requests: Vec<Option<StatementRequest>>,
     ) -> Vec<Option<StatementResult>> {
-        // The second duplicate check looks only at transactions imported or
-        // matched before the import began, each paired at most once.
-        let mut earlier: HashSet<String> = self
-            .transactions
-            .values()
-            .filter(|t| t.import.is_some())
-            .map(|t| t.id.clone())
-            .collect();
+        let mut progress = Progress {
+            unpaired: self
+                .transactions
+                .values()
+                .filter(|t| t.import.is_some())
+                .map(|t| t.id.clone())
+                .collect(),
+            seen: HashMap::new(),
+        };
         let outcomes: Vec<_> = statements
             .iter()
             .zip(requests)
             .map(|(statement, request)| {
-                request.map(|request| self.import_statement(statement, request, &mut earlier))
+                request.map(|request| self.import_statement(statement, request, &mut progress))
             })
             .collect();
         // Every transaction in the response is as it is after the whole
@@ -177,7 +187,7 @@ impl Plan {
         &mut self,
         statement: &Statement,
         request: StatementRequest,
-        earlier: &mut HashSet<String>,
+        progress: &mut Progress,
     ) -> (String, Vec<(BankData, Outcome)>) {
         let StatementRequest {
             options,
@@ -192,23 +202,34 @@ impl Plan {
             .collect();
 
         // The first check runs over every transaction before the second.
-        // An id counts as had from earlier in the statement, too.
+        // An id counts as had from an earlier bank transaction in this
+        // import into the account, too, whatever became of that one.
         let had = self.import_ids.get(&account_id);
-        let mut seen = HashSet::new();
+        let seen = progress.seen.entry(account_id.clone()).or_default();
         let had_id: Vec<bool> = bank
             .iter()
-            .map(|b| had.is_some_and(|had| had.contains(&b.id)) || !seen.insert(&b.id))
+            .map(|b| {
+                let earlier_in_import = !seen.insert(b.id.clone());
+                earlier_in_import || had.is_some_and(|had| had.contains(&b.id))
+            })
             .collect();
+        // A transaction that a first-check duplicate duplicates can't also be
+        // paired by the second check.
+        for (data, _) in bank.iter().zip(&had_id).filter(|(_, had_id)| **had_id) {
+            if let Some(t) = self.imported_as(&account_id, &data.id) {
+                progress.unpaired.remove(&t.id);
+            }
+        }
 
         let mut outcomes = Vec::with_capacity(bank.len());
         for (data, had_id) in bank.into_iter().zip(had_id) {
             let outcome = if had_id {
                 Outcome::HadId
             } else if let Some(paired) = (!not_duplicates.contains(&data.id))
-                .then(|| self.earlier_duplicate(&account_id, &data, earlier))
+                .then(|| self.earlier_duplicate(&account_id, &data, &progress.unpaired))
                 .flatten()
             {
-                earlier.remove(&paired);
+                progress.unpaired.remove(&paired);
                 Outcome::Paired(paired)
             } else {
                 self.import_ids
@@ -230,16 +251,24 @@ impl Plan {
         (account_id, outcomes)
     }
 
+    /// The account's transaction whose `import` has this import id, if any
+    /// (SPEC 17.9's first check).
+    fn imported_as(&self, account_id: &str, import_id: &str) -> Option<&Transaction> {
+        self.transactions.values().find(|t| {
+            t.account_id == account_id && t.import.as_ref().is_some_and(|i| i.data.id == import_id)
+        })
+    }
+
     /// The transaction imported or matched before this import that a bank
     /// transaction duplicates, if any (SPEC 17.9's second check).
     fn earlier_duplicate(
         &self,
         account_id: &str,
         data: &BankData,
-        earlier: &HashSet<String>,
+        unpaired: &HashSet<String>,
     ) -> Option<String> {
         let candidates = self.transactions.values().filter(|t| {
-            earlier.contains(&t.id)
+            unpaired.contains(&t.id)
                 && t.account_id == account_id
                 && t.amount == data.amount
                 && days_apart(&t.date, &data.date) <= 2
@@ -345,12 +374,7 @@ impl Plan {
                 }),
                 Outcome::HadId => {
                     let transaction_id = self
-                        .transactions
-                        .values()
-                        .find(|t| {
-                            t.account_id == result.account_id
-                                && t.import.as_ref().is_some_and(|i| i.data.id == data.id)
-                        })
+                        .imported_as(&result.account_id, &data.id)
                         .map(|t| t.id.clone());
                     result.duplicates.push(Duplicate {
                         data,

@@ -189,6 +189,49 @@ fn a_changed_fitid_is_a_duplicate_of_a_nearby_import() {
 }
 
 #[test]
+fn a_first_check_duplicate_takes_its_transaction_from_the_second_check() {
+    let f = Fx::new();
+    let statements = json!([{"account_id": f.checking}]);
+    expect(f.import(FILE.as_bytes(), &statements), 200);
+    // The payroll is listed again with a new FITID next to the old one: the
+    // old one is a duplicate by id, so the new one can't pair with it.
+    let extra = "<STMTTRN><DTPOSTED>20261016<TRNAMT>1800.00<FITID>NEW</STMTTRN>\n";
+    let file = FILE.replace("</BANKTRANLIST>", &format!("{extra}</BANKTRANLIST>"));
+    let again = expect(f.import(file.as_bytes(), &statements), 200);
+    let entry = &again["statements"][0];
+    assert_eq!(entry["duplicates"].as_array().unwrap().len(), 3);
+    assert_eq!(entry["imported"][0]["import"]["id"], "NEW");
+}
+
+#[test]
+fn a_repeated_id_is_a_duplicate_across_statements() {
+    let f = Fx::new();
+    let statements = json!([{"account_id": f.checking}]);
+    let first = expect(f.import(FILE.as_bytes(), &statements), 200);
+    let payroll = first["statements"][0]["imported"][1]["id"].clone();
+    // Both statements list the payroll with a changed FITID: the first pairs
+    // it with the earlier import, and the second is a duplicate by id.
+    let changed = FILE.replace("202610150001", "OTHER");
+    let twice = json!([{"account_id": f.checking}, {"account_id": f.checking}]);
+    let body = changed.replace(
+        "</BANKMSGSRSV1>",
+        &format!(
+            "{}</BANKMSGSRSV1>",
+            &changed
+                [changed.find("<STMTTRNRS>").unwrap()..changed.find("</BANKMSGSRSV1>").unwrap()]
+        ),
+    );
+    let again = expect(f.import(body.as_bytes(), &twice), 200);
+    let first_dup = &again["statements"][0]["duplicates"][1];
+    assert_eq!(first_dup["id"], "OTHER");
+    assert_eq!(first_dup["transaction_id"], payroll);
+    let second_dup = &again["statements"][1]["duplicates"][1];
+    assert_eq!(second_dup["id"], "OTHER");
+    assert_eq!(second_dup["transaction_id"], Value::Null);
+    assert_eq!(again["statements"][1]["imported"], json!([]));
+}
+
+#[test]
 fn bad_requests() {
     let f = Fx::new();
     let a = &f.checking;
