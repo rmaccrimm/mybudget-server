@@ -1,21 +1,25 @@
-//! Plans as rows of a plan file's tables (schema version 1, in
-//! `migrations/01-plans`).
+//! Plans as rows of a plan file's tables (schema version 2, in
+//! `migrations/01-plans` and `migrations/02-imports`).
 //!
 //! Each kind of object is a [`Record`]: a row of its own table with an `id`,
 //! a `position` giving its list order, and a column for each field. Saving a
 //! change writes only the rows that differ from what the file holds.
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use std::collections::{BTreeSet, HashMap};
+
 use rusqlite::{Connection, Row, params};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 
 use super::Failure;
 use crate::calendar::{self, Month};
+use crate::import::{ImportOptions, StatementKey};
 use crate::model::{
-    Account, AccountType, Assigned, Category, Cleared, FlagColor, Group, Payee, Plan, PlanInfo,
-    READY_TO_ASSIGN, Subtransaction, Table, Transaction,
+    Account, AccountType, Assigned, BankData, Category, Cleared, FlagColor, Group, Import, Payee,
+    Plan, PlanInfo, READY_TO_ASSIGN, Subtransaction, Table, Transaction,
 };
+use crate::ofx::StatementType;
 
 /// Stores serde enums by their wire names, such as `creditCard`, so a plan
 /// file reads like the API.
@@ -39,7 +43,7 @@ macro_rules! wire_name_columns {
     )*};
 }
 
-wire_name_columns!(AccountType, Cleared, FlagColor);
+wire_name_columns!(AccountType, Cleared, FlagColor, StatementType);
 
 impl ToSql for Month {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
@@ -212,8 +216,8 @@ impl Record for Transaction {
         ]
     }
 
-    /// The transaction without its subtransactions, which [`read_plan`]
-    /// reads from their own table.
+    /// The transaction without its subtransactions and its import, which
+    /// [`read_plan`] reads from their own tables.
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get("id")?,
@@ -229,6 +233,7 @@ impl Record for Transaction {
             transfer_account_id: row.get("transfer_account_id")?,
             transfer_transaction_id: row.get("transfer_transaction_id")?,
             subtransactions: Vec::new(),
+            import: None,
         })
     }
 
@@ -241,11 +246,29 @@ impl Record for Transaction {
         for (position, s) in (1_i64..).zip(&self.subtransactions) {
             insert.execute(params![self.id, position, s.amount, s.category_id, s.memo])?;
         }
+        if let Some(Import { data, matched }) = &self.import {
+            conn.prepare_cached(
+                "INSERT INTO transaction_imports \
+                 (transaction_id, import_id, date, amount, payee_name, memo, matched) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?
+            .execute(params![
+                self.id,
+                data.id,
+                data.date,
+                data.amount,
+                data.payee_name,
+                data.memo,
+                matched
+            ])?;
+        }
         Ok(())
     }
 
     fn delete_parts(conn: &Connection, id: &str) -> rusqlite::Result<()> {
         conn.prepare_cached("DELETE FROM subtransactions WHERE transaction_id = ?1")?
+            .execute([id])?;
+        conn.prepare_cached("DELETE FROM transaction_imports WHERE transaction_id = ?1")?
             .execute([id])?;
         Ok(())
     }
@@ -366,6 +389,67 @@ fn write_assigned(conn: &Connection, old: &Assigned, new: &Assigned) -> rusqlite
     Ok(())
 }
 
+/// The import ids each account has had (SPEC 17.9).
+type ImportIds = HashMap<String, BTreeSet<String>>;
+
+fn write_import_ids(conn: &Connection, old: &ImportIds, new: &ImportIds) -> rusqlite::Result<()> {
+    let pairs = |ids: &ImportIds| -> BTreeSet<(String, String)> {
+        ids.iter()
+            .flat_map(|(account, ids)| ids.iter().map(|id| (account.clone(), id.clone())))
+            .collect()
+    };
+    let (old, new) = (pairs(old), pairs(new));
+    for (account, id) in old.difference(&new) {
+        conn.prepare_cached(
+            "DELETE FROM account_import_ids WHERE account_id = ?1 AND import_id = ?2",
+        )?
+        .execute([account, id])?;
+    }
+    for (account, id) in new.difference(&old) {
+        conn.prepare_cached(
+            "INSERT INTO account_import_ids (account_id, import_id) VALUES (?1, ?2)",
+        )?
+        .execute([account, id])?;
+    }
+    Ok(())
+}
+
+/// What imports remember, by statement (SPEC 17.13).
+type RememberedOptions = HashMap<StatementKey, ImportOptions>;
+
+fn write_import_options(
+    conn: &Connection,
+    old: &RememberedOptions,
+    new: &RememberedOptions,
+) -> rusqlite::Result<()> {
+    for (key, options) in old {
+        if new.get(key) != Some(options) {
+            conn.prepare_cached(
+                "DELETE FROM import_options \
+                 WHERE type = ?1 AND bank_id IS ?2 AND account_number = ?3",
+            )?
+            .execute(params![key.kind, key.bank_id, key.account_number])?;
+        }
+    }
+    for (key, options) in new {
+        if old.get(key) != Some(options) {
+            conn.prepare_cached(
+                "INSERT INTO import_options (type, bank_id, account_number, account_id, \
+                 swap_payee_memo, invert_amounts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?
+            .execute(params![
+                key.kind,
+                key.bank_id,
+                key.account_number,
+                options.account_id,
+                options.swap_payee_memo,
+                options.invert_amounts
+            ])?;
+        }
+    }
+    Ok(())
+}
+
 /// Writes the changes from `old`, the plan the file holds, to `new`. With no
 /// `old`, the file is new and holds no plan yet.
 pub fn write_plan(conn: &Connection, old: Option<&Plan>, new: &Plan) -> rusqlite::Result<()> {
@@ -406,6 +490,16 @@ pub fn write_plan(conn: &Connection, old: Option<&Plan>, new: &Plan) -> rusqlite
         conn,
         old.map_or(&Assigned::new(), |p| &p.assigned),
         &new.assigned,
+    )?;
+    write_import_ids(
+        conn,
+        old.map_or(&ImportIds::new(), |p| &p.import_ids),
+        &new.import_ids,
+    )?;
+    write_import_options(
+        conn,
+        old.map_or(&RememberedOptions::new(), |p| &p.import_options),
+        &new.import_options,
     )
 }
 
@@ -456,6 +550,28 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
         t.subtransactions.push(s);
     }
 
+    let mut imports = conn.prepare("SELECT * FROM transaction_imports")?;
+    let imports = imports.query_map([], |r| {
+        let import = Import {
+            data: BankData {
+                id: r.get("import_id")?,
+                date: r.get("date")?,
+                amount: r.get("amount")?,
+                payee_name: r.get("payee_name")?,
+                memo: r.get("memo")?,
+            },
+            matched: r.get("matched")?,
+        };
+        Ok((r.get::<_, String>("transaction_id")?, import))
+    })?;
+    for row in imports {
+        let (transaction_id, import) = row?;
+        let t = transactions
+            .get_mut(&transaction_id)
+            .ok_or("an import's transaction is missing")?;
+        t.import = Some(import);
+    }
+
     let mut assigned = Assigned::new();
     let mut assignments = conn.prepare("SELECT category_id, month, assigned FROM assignments")?;
     for row in assignments.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
@@ -466,6 +582,30 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
             .insert(month, amount);
     }
 
+    let mut import_ids = ImportIds::new();
+    let mut ids = conn.prepare("SELECT account_id, import_id FROM account_import_ids")?;
+    for row in ids.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+        let (account_id, import_id): (String, String) = row?;
+        import_ids.entry(account_id).or_default().insert(import_id);
+    }
+
+    let mut options = conn.prepare("SELECT * FROM import_options")?;
+    let import_options = options
+        .query_map([], |r| {
+            let key = StatementKey {
+                kind: r.get("type")?,
+                bank_id: r.get("bank_id")?,
+                account_number: r.get("account_number")?,
+            };
+            let options = ImportOptions {
+                account_id: r.get("account_id")?,
+                swap_payee_memo: r.get("swap_payee_memo")?,
+                invert_amounts: r.get("invert_amounts")?,
+            };
+            Ok((key, options))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
     let plan = Plan {
         info,
         created_at,
@@ -475,6 +615,8 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
         categories: read_table(conn)?,
         transactions,
         assigned,
+        import_ids,
+        import_options,
     };
     check_links(&plan)?;
     Ok(plan)
@@ -488,7 +630,8 @@ fn check_links(plan: &Plan) -> Result<(), String> {
     check_accounts(plan)?;
     check_payees(plan)?;
     check_categories(plan)?;
-    check_transactions(plan)
+    check_transactions(plan)?;
+    check_imports(plan)
 }
 
 /// `Ok` if `ok`, and otherwise the error naming `problem`.
@@ -615,6 +758,23 @@ fn check_transactions(plan: &Plan) -> Result<(), String> {
     Ok(())
 }
 
+fn check_imports(plan: &Plan) -> Result<(), String> {
+    ensure(
+        plan.transactions
+            .values()
+            .filter_map(|t| t.import.as_ref())
+            .all(|i| calendar::is_date(&i.data.date)),
+        "an import's date isn't a date",
+    )?;
+    ensure(
+        plan.import_ids
+            .keys()
+            .chain(plan.import_options.values().map(|o| &o.account_id))
+            .all(|id| plan.accounts.contains_key(id)),
+        "an import's account is missing",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -643,6 +803,8 @@ mod tests {
         assert_rows(&read.categories, &written.categories);
         assert_rows(&read.transactions, &written.transactions);
         assert_eq!(read.assigned, written.assigned);
+        assert_eq!(read.import_ids, written.import_ids);
+        assert_eq!(read.import_options, written.import_options);
     }
 
     fn add_category(plan: &mut Plan, group_id: &str, name: &str) -> String {

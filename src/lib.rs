@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Router,
     body::Body,
-    extract::Request,
+    extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -34,12 +34,14 @@ mod budget;
 mod calendar;
 mod error;
 mod fields;
+mod import;
 mod json;
 mod model;
+mod ofx;
 mod persistence;
 mod store;
 
-use api::{accounts, categories, months, payees, plans, transactions};
+use api::{accounts, categories, imports, months, payees, plans, transactions};
 use error::ApiError;
 pub use persistence::migrate;
 pub use store::Store;
@@ -98,6 +100,16 @@ impl AppState {
 
 /// Builds the application router.
 pub fn app(state: AppState) -> Router {
+    // The import endpoints take larger bodies than the rest (SPEC 3.13), so
+    // they get their own body limit, and are merged in after the rest get
+    // theirs. Their extractors' own limit, 2 MiB by default, is raised to
+    // match.
+    let imports = Router::new()
+        .route("/plans/{plan}/imports", post(imports::import))
+        .route("/plans/{plan}/imports/preview", post(imports::preview))
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_IMPORT_BODY))
+        .layer(middleware::from_fn_with_state(MAX_IMPORT_BODY, read_body));
     Router::new()
         .route("/health", get(health))
         .route("/plans", get(plans::list).post(plans::create))
@@ -159,6 +171,10 @@ pub fn app(state: AppState) -> Router {
                 .patch(transactions::update)
                 .delete(transactions::delete),
         )
+        .route(
+            "/plans/{plan}/transactions/{transaction}/unmatch",
+            post(transactions::unmatch),
+        )
         .route("/plans/{plan}/months/{month}", get(months::get))
         .route(
             "/plans/{plan}/months/{month}/categories/{category}",
@@ -166,7 +182,8 @@ pub fn app(state: AppState) -> Router {
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(middleware::from_fn(read_body))
+        .layer(middleware::from_fn_with_state(MAX_BODY, read_body))
+        .merge(imports)
         .with_state(state)
 }
 
@@ -184,18 +201,20 @@ async fn method_not_allowed() -> ApiError {
 
 /// Bodies over this many bytes get 413 (SPEC 3.13).
 const MAX_BODY: usize = 1 << 20;
+/// The import endpoints' larger limit (SPEC 3.13, 17.1).
+const MAX_IMPORT_BODY: usize = 16 << 20;
 /// Past this many bytes, stop reading an oversized body.
 const DRAIN_CAP: usize = 64 << 20;
 
 /// Reads the whole body before any route or fallback runs, and answers 413
-/// to one over [`MAX_BODY`] whatever else is wrong with the request
+/// to one over `limit` bytes whatever else is wrong with the request
 /// (SPEC 3.13).
 ///
 /// Hand-rolled because axum's `DefaultBodyLimit` stops reading at the limit
 /// and the client still writing the body gets a reset connection instead of
 /// the 413. This keeps reading (up to [`DRAIN_CAP`]) and throws the excess
 /// away.
-async fn read_body(request: Request, next: Next) -> Response {
+async fn read_body(State(limit): State<usize>, request: Request, next: Next) -> Response {
     let (parts, mut body) = request.into_parts();
     let mut buf = Vec::new();
     let mut total = 0usize;
@@ -203,14 +222,14 @@ async fn read_body(request: Request, next: Next) -> Response {
         let Ok(frame) = frame else { break };
         if let Ok(data) = frame.into_data() {
             total += data.len();
-            if total <= MAX_BODY {
+            if total <= limit {
                 buf.extend_from_slice(&data);
             } else if total > DRAIN_CAP {
                 break;
             }
         }
     }
-    if total > MAX_BODY {
+    if total > limit {
         return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
     next.run(Request::from_parts(parts, Body::from(buf))).await

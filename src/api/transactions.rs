@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Serialize;
 
 use crate::AppState;
 use crate::calendar;
@@ -46,20 +47,14 @@ fn subtransactions(
     field: &str,
     v: &JsonValue,
 ) -> Result<Vec<Subtransaction>, ApiError> {
-    let JsonValue::Array(items) = v else {
-        return Err(ApiError::bad_request(format!("{field} must be an array")));
-    };
-    items
-        .iter()
-        .map(|item| {
-            let sub = Body::object(&format!("each of {field}"), item)?;
-            Ok(Subtransaction {
-                amount: sub.required("amount", fields::amount)?,
-                category_id: sub.required("category_id", |f, v| category_id(plan, f, v))?,
-                memo: sub.nullable("memo", fields::note)?.or_null(),
-            })
+    fields::array(field, v, |item, v| {
+        let sub = Body::object(item, v)?;
+        Ok(Subtransaction {
+            amount: sub.required("amount", fields::amount)?,
+            category_id: sub.required("category_id", |f, v| category_id(plan, f, v))?,
+            memo: sub.nullable("memo", fields::note)?.or_null(),
         })
-        .collect()
+    })
 }
 
 /// The fields of SPEC 8.1, each checked whenever it's present (SPEC 3.6).
@@ -80,12 +75,8 @@ struct Input {
 impl Input {
     fn parse(plan: &Plan, body: &Body) -> Result<Self, ApiError> {
         let payee_id = body.nullable("payee_id", fields::string)?;
-        if let Patch::Set(id) = &payee_id
-            && !plan.payees.contains_key(id)
-        {
-            return Err(ApiError::bad_request(
-                "payee_id doesn't name one of the plan's payees",
-            ));
+        if let Patch::Set(id) = &payee_id {
+            plan.payees.referenced("payee_id", id)?;
         }
         let payee_name = body.nullable("payee_name", fields::payee_name)?;
         Ok(Self {
@@ -380,9 +371,7 @@ pub async fn create(
         .ok_or_else(|| fields::missing("account_id"))?;
     let date = input.date.ok_or_else(|| fields::missing("date"))?;
     let amount = input.amount.ok_or_else(|| fields::missing("amount"))?;
-    let account = plan.accounts.get(&account_id).ok_or_else(|| {
-        ApiError::bad_request("account_id doesn't name one of the plan's accounts")
-    })?;
+    let account = plan.accounts.referenced("account_id", &account_id)?;
     let d = Desired {
         date,
         amount,
@@ -551,6 +540,34 @@ pub async fn delete(
         plan.transactions.shift_remove(&transaction_id);
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct Unmatched {
+    transaction: Transaction,
+    imported: Transaction,
+}
+
+/// Undoes a match (SPEC 17.14).
+pub async fn unmatch(
+    State(state): State<AppState>,
+    Path((plan_id, transaction_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut store = state.store();
+    let t = store.plan(&plan_id)?.transactions.by_id(&transaction_id)?;
+    Body::parse(&body)?;
+    if !t.import.as_ref().is_some_and(|i| i.matched) {
+        return Err(ApiError::conflict("the transaction isn't matched"));
+    }
+    let unmatched = store.change_plan(&plan_id, |plan| {
+        let imported = plan.unmatch(&transaction_id);
+        Unmatched {
+            transaction: plan.transactions[&transaction_id].clone(),
+            imported: plan.transactions[&imported].clone(),
+        }
+    })?;
+    Ok(Json(unmatched))
 }
 
 // ---------------------------------------------------------------------------

@@ -175,6 +175,19 @@ pub fn note(field: &str, v: &Json) -> Result<String, ApiError> {
     }
 }
 
+/// An array, each of whose items passes `check`.
+pub fn array<T>(
+    field: &str,
+    v: &Json,
+    check: impl Fn(&str, &Json) -> Result<T, ApiError>,
+) -> Result<Vec<T>, ApiError> {
+    let Json::Array(items) = v else {
+        return Err(ApiError::bad_request(format!("{field} must be an array")));
+    };
+    let item = format!("each of {field}");
+    items.iter().map(|v| check(&item, v)).collect()
+}
+
 pub fn boolean(field: &str, v: &Json) -> Result<bool, ApiError> {
     match v {
         Json::Bool(b) => Ok(*b),

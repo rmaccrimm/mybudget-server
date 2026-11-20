@@ -112,9 +112,40 @@ pub fn is_date(s: &str) -> bool {
     }
 }
 
+/// The number of days from 1970-01-01 to a stored date, by Howard Hinnant's
+/// `days_from_civil`.
+fn day_number(date: &str) -> i64 {
+    let b = date.as_bytes();
+    let field = |range: std::ops::Range<usize>| {
+        i64::from(digits(&b[range]).expect("stored dates are valid"))
+    };
+    let (month, day) = (field(5..7), field(8..10));
+    let year = field(0..4) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// How many days apart two stored dates are (SPEC 17.9, 17.10).
+pub fn days_apart(a: &str, b: &str) -> u64 {
+    (day_number(a) - day_number(b)).unsigned_abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distances() {
+        assert_eq!(day_number("1970-01-01"), 0);
+        assert_eq!(day_number("2000-03-01"), 11_017);
+        assert_eq!(days_apart("2026-10-05", "2026-10-04"), 1);
+        assert_eq!(days_apart("2024-02-28", "2024-03-01"), 2);
+        assert_eq!(days_apart("2026-12-31", "2027-01-01"), 1);
+        assert_eq!(days_apart("1900-01-01", "2999-12-31"), 401_766);
+    }
 
     #[test]
     fn dates() {

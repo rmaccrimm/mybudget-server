@@ -3,13 +3,14 @@
 //! Every collection is a [`Table`]: an `IndexMap` from id to object, oldest
 //! first. `shift_remove` keeps that order when something is deleted.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::Month;
 use crate::error::ApiError;
+use crate::import::{ImportOptions, StatementKey};
 
 /// The category id of Inflow: Ready to Assign (SPEC 7.7). Generated ids
 /// always contain a `-`, so none equals it.
@@ -39,6 +40,9 @@ pub type Table<T> = IndexMap<String, T>;
 pub trait ById<T> {
     fn by_id(&self, id: &str) -> Result<&T, ApiError>;
     fn by_id_mut(&mut self, id: &str) -> Result<&mut T, ApiError>;
+    /// Looking up an object a body field names, which is 400 if it doesn't
+    /// exist (SPEC 3.4).
+    fn referenced(&self, field: &str, id: &str) -> Result<&T, ApiError>;
 }
 
 impl<T> ById<T> for Table<T> {
@@ -48,6 +52,12 @@ impl<T> ById<T> for Table<T> {
 
     fn by_id_mut(&mut self, id: &str) -> Result<&mut T, ApiError> {
         self.get_mut(id).ok_or_else(ApiError::not_found)
+    }
+
+    fn referenced(&self, field: &str, id: &str) -> Result<&T, ApiError> {
+        self.get(id).ok_or_else(|| {
+            ApiError::bad_request(format!("{field} doesn't name anything in the plan"))
+        })
     }
 }
 
@@ -211,6 +221,29 @@ pub struct Transaction {
     pub transfer_transaction_id: Option<String>,
     /// In the order given; empty unless it's a split (SPEC 10).
     pub subtransactions: Vec<Subtransaction>,
+    /// The bank transaction it was imported from or matched to (SPEC 17.9).
+    pub import: Option<Import>,
+}
+
+/// A bank transaction's data, after its statement's options (SPEC 17.8).
+#[derive(Clone, PartialEq, Debug, Serialize)]
+pub struct BankData {
+    /// Its import id.
+    pub id: String,
+    pub date: String,
+    pub amount: i64,
+    pub payee_name: Option<String>,
+    pub memo: Option<String>,
+}
+
+/// A transaction's `import` (SPEC 17.9).
+#[derive(Clone, PartialEq, Debug, Serialize)]
+pub struct Import {
+    #[serde(flatten)]
+    pub data: BankData,
+    /// Whether it was matched to a transaction already in the account
+    /// (SPEC 17.10), rather than created from the bank's (SPEC 17.11).
+    pub matched: bool,
 }
 
 impl Transaction {
@@ -272,6 +305,10 @@ pub struct Plan {
     pub categories: Table<Category>,
     pub transactions: Table<Transaction>,
     pub assigned: Assigned,
+    /// The import ids each account has had, by account id (SPEC 17.9).
+    pub import_ids: HashMap<String, BTreeSet<String>>,
+    /// What the last import of each statement used (SPEC 17.13).
+    pub import_options: HashMap<StatementKey, ImportOptions>,
 }
 
 impl Plan {
@@ -296,6 +333,8 @@ impl Plan {
             categories: Table::new(),
             transactions: Table::new(),
             assigned: Assigned::new(),
+            import_ids: HashMap::new(),
+            import_options: HashMap::new(),
         }
     }
 
@@ -484,13 +523,17 @@ impl Plan {
     }
 
     /// Deletes an account, its transfer payee and its payment category
-    /// (SPEC 5.9). The caller checks it has no transactions.
+    /// (SPEC 5.9), and what imports kept about it (SPEC 17.6, 17.9). The
+    /// caller checks it has no transactions.
     pub fn delete_account(&mut self, account_id: &str) {
         let account = self
             .accounts
             .shift_remove(account_id)
             .expect("the caller found the account");
         self.payees.shift_remove(&account.transfer_payee_id);
+        self.import_ids.remove(account_id);
+        self.import_options
+            .retain(|_, options| options.account_id != account_id);
         if let Some(category_id) = account.payment_category_id {
             self.assigned.remove(&category_id);
             self.categories.shift_remove(&category_id);

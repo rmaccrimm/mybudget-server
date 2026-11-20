@@ -108,7 +108,7 @@ fn create_list_and_patch() {
         json!({"id": sid, "account_id": c, "date": "2026-10-04", "amount": -120000,
                "payee_id": payee, "category_id": g, "memo": "weekly shop",
                "cleared": "uncleared", "approved": true, "flag_color": null,
-               "transfer_account_id": null, "transfer_transaction_id": null, "subtransactions": []})
+               "transfer_account_id": null, "transfer_transaction_id": null, "subtransactions": [], "import": null})
     );
     let pay = f.create(&format!(
         r#"{{"account_id": "{c}", "date": "2026-10-15", "amount": 1800000, "payee_name": "Employer", "category_id": "ready_to_assign"}}"#
@@ -281,7 +281,7 @@ fn transfers() {
         json!({"id": in_id, "account_id": sv, "date": "2026-10-05", "amount": 500000,
                "payee_id": f.checking_payee, "category_id": null, "memo": null,
                "cleared": "uncleared", "approved": true, "flag_color": null,
-               "transfer_account_id": c, "transfer_transaction_id": out_id, "subtransactions": []})
+               "transfer_account_id": c, "transfer_transaction_id": out_id, "subtransactions": [], "import": null})
     );
     // Self-transfer, category on an on-budget transfer, split transfer.
     let bad = |body: String| err(&post(&f.s, &f.txns(), &body), 400);

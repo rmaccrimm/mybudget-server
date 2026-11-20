@@ -28,8 +28,12 @@ use records::{read_plan, write_plan};
 /// Every schema version's migration: version `n` is the state after the
 /// first `n` (SPEC 15.8). A shipped migration never changes; each change to
 /// what a plan file holds adds one.
-const MIGRATIONS: &[M] = &[M::up(include_str!("../../migrations/01-plans/up.sql"))
-    .down(include_str!("../../migrations/01-plans/down.sql"))];
+const MIGRATIONS: &[M] = &[
+    M::up(include_str!("../../migrations/01-plans/up.sql"))
+        .down(include_str!("../../migrations/01-plans/down.sql")),
+    M::up(include_str!("../../migrations/02-imports/up.sql"))
+        .down(include_str!("../../migrations/02-imports/down.sql")),
+];
 
 /// The schema version this server writes.
 const LATEST: usize = MIGRATIONS.len();
