@@ -446,9 +446,13 @@ fn required(name: &str) -> String {
 /// anything after them, such as a time or time zone, which is ignored.
 fn date(value: &str) -> Result<String, String> {
     let error = || format!("{value} isn't a date YYYYMMDD");
-    let digits = value.get(..8).ok_or_else(error)?;
+    // Checking the digits first makes the slicing below land on char boundaries.
+    let digits = value
+        .get(..8)
+        .filter(|d| d.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(error)?;
     let date = format!("{}-{}-{}", &digits[..4], &digits[4..6], &digits[6..]);
-    if digits.bytes().all(|b| b.is_ascii_digit()) && calendar::is_date(&date) {
+    if calendar::is_date(&date) {
         Ok(date)
     } else {
         Err(error())
@@ -543,6 +547,8 @@ mod tests {
             "18991231",
             "2026-10-05",
             "２０２６1005",
+            "202é1050",
+            "2026é005",
         ] {
             assert!(date(bad).is_err(), "{bad}");
         }
