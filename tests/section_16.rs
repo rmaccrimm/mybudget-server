@@ -246,3 +246,84 @@ fn transfer_to_tracking_keeps_or_loses_its_category() {
     let plain = expect(f.edit(&t, json!({"payee_id": null})), 200);
     assert_eq!(plain["category_id"], food);
 }
+
+#[test]
+fn tracking_half_sets_and_keeps_the_on_budget_halfs_category() {
+    let f = Fx::new();
+    let checking = f.account("Checking", "checking", 0);
+    let visa = f.account("Visa", "creditCard", 0);
+    let house = f.account("House", "otherAsset", 0);
+    let car = f.account("Car", "otherAsset", 0);
+    let food = f.category("Food");
+    let payee = |a: &Value| a["transfer_payee_id"].as_str().unwrap().to_owned();
+    let get_txn = |t: &str| expect(get(&f.s, &f.path(&format!("transactions/{t}"))), 200);
+
+    // From the tracking side, the category goes on the on-budget half.
+    let t = f.txn(
+        json!({"account_id": id(&house), "date": "2026-10-02", "amount": 1000,
+                         "payee_id": payee(&checking), "category_id": food}),
+    );
+    assert_eq!(t["category_id"], Value::Null);
+    let other = t["transfer_transaction_id"].as_str().unwrap().to_owned();
+    assert_eq!(get_txn(&other)["category_id"], food);
+
+    // Moving the other half to Visa keeps its category (9.3).
+    let moved = expect(f.edit(&id(&t), json!({"payee_id": payee(&visa)})), 200);
+    let new_other = moved["transfer_transaction_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new_other, other);
+    let half = get_txn(&new_other);
+    assert_eq!(half["account_id"], id(&visa));
+    assert_eq!(half["category_id"], food);
+    err(&get(&f.s, &f.path(&format!("transactions/{other}"))), 404);
+
+    // null from the tracking side leaves the on-budget half uncategorized.
+    expect(f.edit(&id(&t), json!({"category_id": null})), 200);
+    assert_eq!(get_txn(&new_other)["category_id"], Value::Null);
+    assert_eq!(f.uncategorized_ids("true"), vec![new_other.clone()]);
+    // Visa's uncategorized spending, which Uncategorized can't fund (16.2).
+    assert_eq!(
+        f.month("2026-10")["uncategorized"],
+        entry(None, 0, -1000, -1000, 0, 1000)
+    );
+
+    // To another tracking account: no category anywhere, and none allowed.
+    err(
+        &f.edit(
+            &id(&t),
+            json!({"payee_id": payee(&car), "category_id": food}),
+        ),
+        400,
+    );
+    expect(f.edit(&id(&t), json!({"payee_id": payee(&car)})), 200);
+    // Back to an on-budget account: there's no category to keep.
+    let back = expect(f.edit(&id(&t), json!({"payee_id": payee(&checking)})), 200);
+    let half = get_txn(back["transfer_transaction_id"].as_str().unwrap());
+    assert_eq!(half["category_id"], Value::Null);
+}
+
+#[test]
+fn card_half_left_without_a_transfer_is_an_uncategorized_refund() {
+    let f = Fx::new();
+    let checking = f.account("Checking", "checking", 100000);
+    let visa = f.account("Visa", "creditCard", 0);
+    let pay = visa["payment_category_id"].as_str().unwrap().to_owned();
+    let payment = f.txn(
+        json!({"account_id": id(&checking), "date": "2026-10-20", "amount": -20000,
+                               "payee_id": visa["transfer_payee_id"]}),
+    );
+    let visa_half = payment["transfer_transaction_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let paid = entry(Some(&pay), 0, -20000, -20000, 20000, 0);
+    assert_eq!(f.month("2026-10")["categories"][0], paid);
+    let plain = expect(f.edit(&visa_half, json!({"payee_id": null})), 200);
+    assert_eq!(plain["category_id"], Value::Null);
+    // The refund comes off the payment category as the payment did (12.4).
+    let oct = f.month("2026-10");
+    assert_eq!(oct["uncategorized"], entry(None, 0, 20000, 20000, 0, 0));
+    assert_eq!(oct["categories"][0], paid);
+}
