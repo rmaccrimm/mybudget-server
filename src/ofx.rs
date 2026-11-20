@@ -161,24 +161,21 @@ struct Element {
 }
 
 impl Element {
-    /// Absent: it holds neither a value nor other elements.
-    fn is_absent(&self) -> bool {
-        self.value.is_none() && self.children.is_empty()
-    }
-
     fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
         self.children.iter().filter(move |c| c.name == name)
     }
 
-    /// Of the elements named `name` it holds, the first that isn't absent.
-    fn child(&self, name: &str) -> Option<&Element> {
-        self.children
-            .iter()
-            .find(|c| c.name == name && !c.is_absent())
+    /// Of the elements named `name` it holds directly, the first that holds
+    /// other elements: SPEC 17.3's first that isn't absent, for an element
+    /// whose elements SPEC 17.4 reads.
+    fn child<'a>(&'a self, name: &'a str) -> Option<&'a Element> {
+        self.children_named(name).find(|c| !c.children.is_empty())
     }
 
-    fn value_of(&self, name: &str) -> Option<&str> {
-        self.child(name)?.value.as_deref()
+    /// Of the values of the elements named `name` it holds directly, the
+    /// first that isn't absent (SPEC 17.3).
+    fn value_of<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        self.children_named(name).find_map(|c| c.value.as_deref())
     }
 }
 
@@ -384,13 +381,14 @@ fn statements(root: &Element) -> Result<Vec<Statement>, String> {
     found.into_iter().map(statement).collect()
 }
 
+/// Statements are found wherever they are, even inside other statements, in
+/// the order their start tags appear (SPEC 17.4).
 fn find_statements<'a>(element: &'a Element, found: &mut Vec<&'a Element>) {
     for child in &element.children {
         if matches!(child.name.as_str(), "STMTRS" | "CCSTMTRS") {
             found.push(child);
-        } else {
-            find_statements(child, found);
         }
+        find_statements(child, found);
     }
 }
 
@@ -578,8 +576,25 @@ mod tests {
 
     #[test]
     fn first_present_element_counts() {
-        let root = tree("<A><N></N><N>one</N><N>two</N></A>");
+        let root = tree("<A><N></N><N><X>x</X></N><N>one</N><N>two</N></A>");
         assert_eq!(root.child("A").unwrap().value_of("N"), Some("one"));
+        let root = tree("<R><L>text</L><L><B>1</B></L></R>");
+        let l = root.child("R").unwrap().child("L").unwrap();
+        assert_eq!(l.value_of("B"), Some("1"));
+    }
+
+    #[test]
+    fn elements_are_read_only_where_they_belong() {
+        let file = "<STMTRS><BANKACCTFROM><ACCTID>1</BANKACCTFROM>\
+            <BANKTRANLIST><STMTTRN><DTPOSTED>20261005<TRNAMT>1\
+            <NAME>A<MEMO>inner</MEMO></NAME></STMTTRN></BANKTRANLIST>\
+            <X><CCSTMTRS><CCACCTFROM><ACCTID>2</CCACCTFROM></CCSTMTRS></X>\
+            </STMTRS>";
+        let found = statements(&tree(file)).unwrap();
+        let numbers: Vec<_> = found.iter().map(|s| s.account_number.as_str()).collect();
+        assert_eq!(numbers, ["1", "2"]);
+        let t = &found[0].transactions[0];
+        assert_eq!((t.name.as_deref(), t.memo.as_deref()), (Some("A"), None));
     }
 
     #[test]
