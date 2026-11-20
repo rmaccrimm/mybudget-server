@@ -70,19 +70,6 @@ impl Body {
             Some(v) => Patch::Set(check(key, v)?),
         })
     }
-
-    /// A nullable field that must be present, though it may be `null`.
-    pub fn required_nullable<'a, T>(
-        &'a self,
-        key: &str,
-        check: impl FnOnce(&str, &'a Json) -> Result<T, ApiError>,
-    ) -> Result<Option<T>, ApiError> {
-        match self.nullable(key, check)? {
-            Patch::Absent => Err(missing(key)),
-            Patch::Null => Ok(None),
-            Patch::Set(value) => Ok(Some(value)),
-        }
-    }
 }
 
 /// What a body says about a nullable field (SPEC 3.10).
@@ -293,8 +280,6 @@ mod tests {
         assert_eq!(body.nullable("memo", note).unwrap(), Patch::Null);
         assert_eq!(body.nullable("payee_id", string).unwrap(), Patch::Absent);
         assert!(body.nullable("flag_color", boolean).is_err());
-        assert_eq!(body.required_nullable("memo", note).unwrap(), None);
-        assert!(body.required_nullable("payee_id", string).is_err());
 
         let current = Some(FlagColor::Blue);
         assert_eq!(Patch::Absent.applied_to(current.as_ref()), current);

@@ -546,6 +546,23 @@ impl Plan {
         }
     }
 
+    /// Whether a transaction is uncategorized (SPEC 16.1): in an on-budget
+    /// account, without a category, and neither a split nor a transfer
+    /// between two on-budget accounts.
+    pub fn is_uncategorized(&self, t: &Transaction) -> bool {
+        let on_budget = |account_id: &str| {
+            self.accounts
+                .get(account_id)
+                .expect("a transaction's accounts exist")
+                .kind
+                .on_budget()
+        };
+        on_budget(&t.account_id)
+            && t.category_id.is_none()
+            && t.subtransactions.is_empty()
+            && !t.transfer_account_id.as_deref().is_some_and(on_budget)
+    }
+
     pub fn category_in_use(&self, category_id: &str) -> bool {
         self.transactions
             .values()

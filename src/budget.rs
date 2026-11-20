@@ -1,5 +1,9 @@
 //! Months and Ready to Assign (SPEC 11), with credit cards (SPEC 12).
 //!
+//! Uncategorized transactions are the lines of one more user category,
+//! Uncategorized, whose `assigned` is always 0 (SPEC 16.2). Figures are kept
+//! by [`Key`], which is `None` for it.
+//!
 //! Everything is sparse: only months with an assignment, a line or income
 //! are stored, and the figures for any other month follow from those.
 
@@ -10,10 +14,17 @@ use serde::Serialize;
 use crate::calendar::Month;
 use crate::model::{Plan, READY_TO_ASSIGN, Transaction};
 
-/// A category's figures for one month (SPEC 11.3).
+/// Whose figures these are: a category's id, or [`UNCATEGORIZED`].
+type Key<'a> = Option<&'a str>;
+
+/// Uncategorized (SPEC 16.2), which has no id: its entry's `category_id` is
+/// `null` (SPEC 16.3).
+const UNCATEGORIZED: Key = None;
+
+/// A category's figures for one month (SPEC 11.3, 16.3).
 #[derive(Serialize)]
 pub struct Entry {
-    pub category_id: String,
+    pub category_id: Option<String>,
     pub assigned: i64,
     pub activity: i64,
     pub available: i64,
@@ -33,6 +44,7 @@ pub struct MonthView {
     left_over_from_last_month: i64,
     assigned_in_future: i64,
     ready_to_assign: i64,
+    uncategorized: Entry,
     categories: Vec<Entry>,
 }
 
@@ -90,8 +102,8 @@ fn with_assigned<T: Default>(
 /// The plan's months, computed from its assignments and lines.
 pub struct Budget<'a> {
     plan: &'a Plan,
-    /// Per category id, the months it has an assignment or activity in.
-    cells: HashMap<&'a str, BTreeMap<Month, Cell>>,
+    /// Per category, the months it has an assignment or activity in.
+    cells: HashMap<Key<'a>, BTreeMap<Month, Cell>>,
     /// Income by month (SPEC 11.6).
     income: BTreeMap<Month, i64>,
     /// Cash advances by month (SPEC 12.5).
@@ -100,8 +112,8 @@ pub struct Budget<'a> {
 
 /// A plan's lines, gathered by category and month (SPEC 11.1, 12.5).
 struct Lines<'a> {
-    /// Per user category id, its raw figures by month.
-    raw: HashMap<&'a str, BTreeMap<Month, Raw>>,
+    /// Per user category, Uncategorized included, its raw figures by month.
+    raw: HashMap<Key<'a>, BTreeMap<Month, Raw>>,
     /// Payment categories' activity, by account index and month.
     payment_activity: HashMap<usize, BTreeMap<Month, i64>>,
     income: BTreeMap<Month, i64>,
@@ -116,10 +128,11 @@ impl<'a> Lines<'a> {
             .filter(|c| c.payment_account_id.is_none())
             .map(|c| {
                 (
-                    c.id.as_str(),
+                    Some(c.id.as_str()),
                     with_assigned(plan, &c.id, |r: &mut Raw| &mut r.assigned),
                 )
             })
+            .chain([(UNCATEGORIZED, BTreeMap::new())])
             .collect();
         let mut lines = Self {
             raw,
@@ -133,7 +146,7 @@ impl<'a> Lines<'a> {
         lines
     }
 
-    fn add(&mut self, plan: &Plan, t: &Transaction) {
+    fn add(&mut self, plan: &Plan, t: &'a Transaction) {
         // Accounts are numbered by creation order, the order credit
         // funding follows.
         let (ai, _, account) = plan
@@ -168,13 +181,13 @@ impl<'a> Lines<'a> {
                 *self.cash_advances.entry(month).or_insert(0) -= t.amount;
             }
         }
-        let mut line = |category: &str, amount: i64| {
-            if category == READY_TO_ASSIGN {
+        let mut line = |category: Key<'a>, amount: i64| {
+            if category == Some(READY_TO_ASSIGN) {
                 // In a credit account it changes nothing (SPEC 12.6).
                 if kind.is_cash() {
                     *self.income.entry(month).or_insert(0) += amount;
                 }
-            } else if let Some(map) = self.raw.get_mut(category) {
+            } else if let Some(map) = self.raw.get_mut(&category) {
                 let r = map.entry(month).or_default();
                 if kind.is_credit() {
                     *r.credit.entry(ai).or_insert(0) += amount;
@@ -183,23 +196,21 @@ impl<'a> Lines<'a> {
                 }
             }
         };
-        if t.subtransactions.is_empty() {
-            if let Some(c) = &t.category_id {
-                line(c, t.amount);
-            }
-        } else {
+        if !t.subtransactions.is_empty() {
             for s in &t.subtransactions {
-                line(&s.category_id, s.amount);
+                line(Some(&s.category_id), s.amount);
             }
+        } else if t.category_id.is_some() || plan.is_uncategorized(t) {
+            line(t.category_id.as_deref(), t.amount);
         }
     }
 
     /// Settles each user category month by month, funding its credit
     /// spending from what it holds (SPEC 12.2, 12.3), and passes the
     /// funded amounts and refunds on to the payment categories (12.4).
-    fn settle(&mut self) -> HashMap<&'a str, BTreeMap<Month, Cell>> {
+    fn settle(&mut self) -> HashMap<Key<'a>, BTreeMap<Month, Cell>> {
         let mut cells = HashMap::new();
-        for (&cid, months) in &self.raw {
+        for (&key, months) in &self.raw {
             let mut out = BTreeMap::new();
             let mut available = 0i64;
             for (&m, r) in months {
@@ -230,7 +241,7 @@ impl<'a> Lines<'a> {
                 available = cell.available(available);
                 out.insert(m, cell);
             }
-            cells.insert(cid, out);
+            cells.insert(key, out);
         }
         cells
     }
@@ -254,7 +265,7 @@ impl<'a> Budget<'a> {
             for (&m, &a) in lines.payment_activity.get(&ai).into_iter().flatten() {
                 map.entry(m).or_default().activity += a;
             }
-            cells.insert(c.id.as_str(), map);
+            cells.insert(Some(c.id.as_str()), map);
         }
 
         Self {
@@ -267,7 +278,11 @@ impl<'a> Budget<'a> {
 
     /// A category's entry for `month` (SPEC 11.3 to 11.5, 12.1 to 12.3).
     pub fn entry(&self, category_id: &str, month: Month) -> Entry {
-        let cells = self.cells.get(category_id);
+        self.entry_of(Some(category_id), month)
+    }
+
+    fn entry_of(&self, key: Key, month: Month) -> Entry {
+        let cells = self.cells.get(&key);
         // Months without figures between those with them just carry
         // `available` over (SPEC 11.4).
         let before = cells
@@ -280,7 +295,7 @@ impl<'a> Budget<'a> {
             .unwrap_or_default();
         let available = cell.available(before);
         Entry {
-            category_id: category_id.to_owned(),
+            category_id: key.map(str::to_owned),
             assigned: cell.assigned,
             activity: cell.activity,
             available,
@@ -289,7 +304,8 @@ impl<'a> Budget<'a> {
         }
     }
 
-    /// Total cash overspending by month, over every category.
+    /// Total cash overspending by month, over every category, Uncategorized
+    /// included (SPEC 16.2).
     fn cash_overspending(&self) -> BTreeMap<Month, i64> {
         let mut out = BTreeMap::new();
         for cells in self.cells.values() {
@@ -337,6 +353,9 @@ impl<'a> Budget<'a> {
             }
             categories.push(e);
         }
+        // Uncategorized counts in the month's activity (SPEC 16.2).
+        let uncategorized = self.entry_of(UNCATEGORIZED, month);
+        activity += uncategorized.activity;
 
         let overspending = self.cash_overspending();
         let net = self.net();
@@ -368,6 +387,7 @@ impl<'a> Budget<'a> {
             left_over_from_last_month,
             assigned_in_future,
             ready_to_assign: pool - assigned_in_future,
+            uncategorized,
             categories,
         }
     }

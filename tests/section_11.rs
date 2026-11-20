@@ -111,6 +111,7 @@ fn example_11_8() {
         json!({"month": "2026-10", "income": 3000000, "cash_advances": 0, "assigned": 1650000,
                "activity": -200000, "cash_overspending_last_month": 0, "left_over_from_last_month": 0,
                "assigned_in_future": 1200000, "ready_to_assign": 150000,
+               "uncategorized": no_uncategorized(),
                "categories": [entry(&f.groceries, 400000, -120000, 280000, 0),
                               entry(&f.rent, 1200000, 0, 1200000, 0),
                               entry(&f.dining, 50000, -80000, -30000, 30000)]})
@@ -120,6 +121,7 @@ fn example_11_8() {
         json!({"month": "2026-11", "income": 0, "cash_advances": 0, "assigned": 1200000,
                "activity": 0, "cash_overspending_last_month": 30000, "left_over_from_last_month": 1350000,
                "assigned_in_future": 0, "ready_to_assign": 120000,
+               "uncategorized": no_uncategorized(),
                "categories": [entry(&f.groceries, 0, 0, 280000, 0),
                               entry(&f.rent, 1200000, 0, 2400000, 0),
                               entry(&f.dining, 0, 0, 0, 0)]})

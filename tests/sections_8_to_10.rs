@@ -204,9 +204,6 @@ fn validation() {
     let (c, a, g) = (&f.checking, &f.asset, &f.groceries);
     let bad = |body: String| err(&post(&f.s, &f.txns(), &body), 400);
     bad(format!(
-        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1}}"#
-    )); // no category
-    bad(format!(
         r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": -1, "category_id": "{}"}}"#,
         f.visa_payment
     ));
@@ -231,7 +228,8 @@ fn validation() {
     bad(r#"{"account_id": "nope", "date": "2026-10-04", "amount": 1, "category_id": "ready_to_assign"}"#.into());
     // A failed request creates no payee (SPEC 3.11).
     bad(format!(
-        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "payee_name": "Ghost"}}"#
+        r#"{{"account_id": "{c}", "date": "2026-10-04", "amount": 1, "payee_name": "Ghost", "category_id": "{}"}}"#,
+        f.visa_payment
     ));
     let payees = expect(get(&f.s, &format!("/plans/{}/payees", f.p)), 200);
     assert!(
@@ -310,18 +308,17 @@ fn transfers() {
         (json!(-7000), json!("2026-10-09"), Value::Null)
     );
 
-    // Changing to an ordinary payee needs a category, and deletes the other half.
-    err(&f.patch(&out_id, r#"{"payee_name": "Bank"}"#), 400);
-    assert_eq!(f.get(&in_id)["amount"], 7000);
+    // Changing to an ordinary payee deletes the other half, and leaves the
+    // transaction uncategorized unless it's given a category (9.5).
+    let o = expect(f.patch(&out_id, r#"{"payee_name": "Bank"}"#), 200);
+    assert_eq!(o["transfer_transaction_id"], Value::Null);
+    assert_eq!(o["category_id"], Value::Null);
+    err(&get(&f.s, &f.txn(&in_id)), 404);
     let o = expect(
-        f.patch(
-            &out_id,
-            r#"{"payee_name": "Bank", "category_id": "ready_to_assign"}"#,
-        ),
+        f.patch(&out_id, r#"{"category_id": "ready_to_assign"}"#),
         200,
     );
-    assert_eq!(o["transfer_transaction_id"], Value::Null);
-    err(&get(&f.s, &f.txn(&in_id)), 404);
+    assert_eq!(o["category_id"], "ready_to_assign");
 
     // Ordinary to transfer into a tracking account: on-budget half keeps its category.
     let o = expect(
@@ -376,7 +373,9 @@ fn splits() {
     ));
 
     err(&f.patch(&sid, r#"{"amount": -1}"#), 400);
-    err(&f.patch(&sid, r#"{"subtransactions": []}"#), 400);
+    // Unsplitting without a category leaves it uncategorized (10.4).
+    let t = expect(f.patch(&sid, r#"{"subtransactions": []}"#), 200);
+    assert_eq!(t["category_id"], Value::Null);
     let t = expect(
         f.patch(
             &sid,

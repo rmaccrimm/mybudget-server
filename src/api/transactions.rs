@@ -38,25 +38,14 @@ fn category_id(plan: &Plan, field: &str, v: &JsonValue) -> Result<String, ApiErr
     Ok(id)
 }
 
-/// A subtransaction as given; its category is checked against the account
-/// later (SPEC 10.2).
-struct SubInput {
-    amount: i64,
-    category_id: Option<String>,
-    memo: Option<String>,
-}
-
-impl From<&Subtransaction> for SubInput {
-    fn from(s: &Subtransaction) -> Self {
-        Self {
-            amount: s.amount,
-            category_id: Some(s.category_id.clone()),
-            memo: s.memo.clone(),
-        }
-    }
-}
-
-fn subtransactions(plan: &Plan, field: &str, v: &JsonValue) -> Result<Vec<SubInput>, ApiError> {
+/// Subtransactions as given. A subtransaction is never uncategorized, so its
+/// `category_id` can't be `null` (SPEC 10.2); whether the category suits the
+/// account is checked later.
+fn subtransactions(
+    plan: &Plan,
+    field: &str,
+    v: &JsonValue,
+) -> Result<Vec<Subtransaction>, ApiError> {
     let JsonValue::Array(items) = v else {
         return Err(ApiError::bad_request(format!("{field} must be an array")));
     };
@@ -64,10 +53,9 @@ fn subtransactions(plan: &Plan, field: &str, v: &JsonValue) -> Result<Vec<SubInp
         .iter()
         .map(|item| {
             let sub = Body::object(&format!("each of {field}"), item)?;
-            Ok(SubInput {
+            Ok(Subtransaction {
                 amount: sub.required("amount", fields::amount)?,
-                category_id: sub
-                    .required_nullable("category_id", |f, v| category_id(plan, f, v))?,
+                category_id: sub.required("category_id", |f, v| category_id(plan, f, v))?,
                 memo: sub.nullable("memo", fields::note)?.or_null(),
             })
         })
@@ -86,7 +74,7 @@ struct Input {
     cleared: Option<Cleared>,
     approved: Option<bool>,
     flag_color: Patch<FlagColor>,
-    subtransactions: Option<Vec<SubInput>>,
+    subtransactions: Option<Vec<Subtransaction>>,
 }
 
 impl Input {
@@ -158,7 +146,7 @@ struct Desired {
     cleared: Cleared,
     approved: bool,
     flag_color: Option<FlagColor>,
-    subs: Vec<SubInput>,
+    subs: Vec<Subtransaction>,
 }
 
 /// Which half of a transfer carries its category.
@@ -199,28 +187,28 @@ fn transfer_target<'a>(plan: &'a Plan, payee: &PayeeChoice) -> Option<&'a Accoun
     plan.accounts.get(account_id)
 }
 
-/// A category in an on-budget account: required, and a user category or
-/// Ready to Assign, never a payment category (SPEC 8.2).
-fn check_on_budget_category(
-    plan: &Plan,
-    field: &str,
-    category: Option<&str>,
-) -> Result<(), ApiError> {
-    match category {
-        None => Err(ApiError::bad_request(format!(
-            "{field} is required in an on-budget account"
-        ))),
-        Some(READY_TO_ASSIGN) => Ok(()),
-        Some(id) => match plan.categories.get(id) {
-            Some(c) if c.payment_account_id.is_none() => Ok(()),
-            Some(_) => Err(ApiError::bad_request(format!(
-                "{field} can't be a credit card payment category"
-            ))),
-            None => Err(ApiError::bad_request(format!(
-                "{field} doesn't name one of the plan's categories"
-            ))),
-        },
+/// A category in an on-budget account: a user category or Ready to Assign,
+/// never a payment category (SPEC 8.2).
+fn check_on_budget_category(plan: &Plan, field: &str, category: &str) -> Result<(), ApiError> {
+    if category == READY_TO_ASSIGN {
+        return Ok(());
     }
+    match plan.categories.get(category) {
+        Some(c) if c.payment_account_id.is_none() => Ok(()),
+        Some(_) => Err(ApiError::bad_request(format!(
+            "{field} can't be a credit card payment category"
+        ))),
+        None => Err(ApiError::bad_request(format!(
+            "{field} doesn't name one of the plan's categories"
+        ))),
+    }
+}
+
+/// The category of an on-budget account's transaction that isn't a split:
+/// as [`check_on_budget_category`] says, or none, which leaves it
+/// uncategorized (SPEC 8.2, 16.1).
+fn check_optional_category(plan: &Plan, category: Option<&str>) -> Result<(), ApiError> {
+    category.map_or(Ok(()), |c| check_on_budget_category(plan, "category_id", c))
 }
 
 /// Where a valid transfer goes.
@@ -254,7 +242,7 @@ fn validate<'a>(
             }
             CategorySide::Neither => {}
             CategorySide::This | CategorySide::Other => {
-                check_on_budget_category(plan, "category_id", d.category.as_deref())?;
+                check_optional_category(plan, d.category.as_deref())?;
             }
         }
         return Ok(Some(Transfer { to, side }));
@@ -277,14 +265,10 @@ fn validate<'a>(
             ));
         }
         for s in &d.subs {
-            check_on_budget_category(
-                plan,
-                "a subtransaction's category_id",
-                s.category_id.as_deref(),
-            )?;
+            check_on_budget_category(plan, "a subtransaction's category_id", &s.category_id)?;
         }
     } else if on_budget {
-        check_on_budget_category(plan, "category_id", d.category.as_deref())?;
+        check_optional_category(plan, d.category.as_deref())?;
     } else if d.category.is_some() {
         return Err(ApiError::bad_request(
             "category_id must be null in a tracking account",
@@ -363,18 +347,7 @@ impl Desired {
         t.cleared = self.cleared;
         t.approved = self.approved;
         t.flag_color = self.flag_color;
-        t.subtransactions = self
-            .subs
-            .iter()
-            .map(|s| Subtransaction {
-                amount: s.amount,
-                category_id: s
-                    .category_id
-                    .clone()
-                    .expect("validate checked every split line has a category"),
-                memo: s.memo.clone(),
-            })
-            .collect();
+        t.subtransactions.clone_from(&self.subs);
     }
 }
 
@@ -489,7 +462,7 @@ pub async fn update(
         .unwrap_or_else(|| PayeeChoice::from_id(t.payee_id.clone()));
     let subs = input
         .subtransactions
-        .unwrap_or_else(|| t.subtransactions.iter().map(SubInput::from).collect());
+        .unwrap_or_else(|| t.subtransactions.clone());
     let category = match input.category_id {
         Patch::Set(id) => Some(id),
         Patch::Null => None,
@@ -583,8 +556,21 @@ pub async fn delete(
 // ---------------------------------------------------------------------------
 // Listing
 
+/// A boolean query parameter: `true` or `false`, and 400 otherwise
+/// (SPEC 8.5, 16.4).
+fn boolean_param(key: &str, value: &str) -> Result<bool, ApiError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ApiError::bad_request(format!(
+            "{key} must be true or false"
+        ))),
+    }
+}
+
 /// Lists transactions by date, oldest first within a date, filtered by the
-/// query parameters of SPEC 8.5. A repeated parameter keeps its last value.
+/// query parameters of SPEC 8.5 and 16.4. A repeated parameter keeps its
+/// last value.
 pub async fn list(
     State(state): State<AppState>,
     Path(plan_id): Path<String>,
@@ -593,7 +579,8 @@ pub async fn list(
     let store = state.store();
     let plan = store.plan(&plan_id)?;
     let (mut account_id, mut payee_id, mut category_id) = (None, None, None);
-    let (mut since, mut until, mut approved) = (None, None, None);
+    let (mut since, mut until) = (None, None);
+    let (mut approved, mut uncategorized) = (None, None);
     for (key, value) in query {
         let date = |v: String| {
             if calendar::is_date(&v) {
@@ -608,13 +595,8 @@ pub async fn list(
             "category_id" => category_id = Some(value),
             "since_date" => since = Some(date(value)?),
             "until_date" => until = Some(date(value)?),
-            "approved" => {
-                approved = Some(match value.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err(ApiError::bad_request("approved must be true or false")),
-                });
-            }
+            "approved" => approved = Some(boolean_param(&key, &value)?),
+            "uncategorized" => uncategorized = Some(boolean_param(&key, &value)?),
             _ => {}
         }
     }
@@ -631,6 +613,7 @@ pub async fn list(
         .filter(|t| since.as_ref().is_none_or(|d| &t.date >= d))
         .filter(|t| until.as_ref().is_none_or(|d| &t.date <= d))
         .filter(|t| approved.is_none_or(|a| t.approved == a))
+        .filter(|t| uncategorized.is_none_or(|u| plan.is_uncategorized(t) == u))
         .cloned()
         .collect();
     // Stable, so creation order holds within a date.
