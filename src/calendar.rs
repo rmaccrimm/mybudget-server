@@ -48,6 +48,14 @@ impl Month {
         date[..7].parse().expect("stored dates are valid")
     }
 
+    /// The date in this month on day `day`, or on the month's last day when
+    /// `day` is `None` or past the end of the month (SPEC 18.5).
+    pub fn date_on(self, day: Option<u8>) -> String {
+        let last = self.days();
+        let day = day.map_or(last, |d| u32::from(d).min(last));
+        format!("{self}-{day:02}")
+    }
+
     fn days(self) -> u32 {
         let year = self.year();
         let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
@@ -109,6 +117,26 @@ pub fn is_date(s: &str) -> bool {
     match (s[..7].parse::<Month>(), digits(&b[8..])) {
         (Ok(month), Some(day)) => (1..=month.days()).contains(&day),
         _ => false,
+    }
+}
+
+/// Today (SPEC 18.1): the date in `MYBUDGET_TODAY` when it's set and not
+/// empty, and otherwise the current date in the local time zone. Anything
+/// in `MYBUDGET_TODAY` that isn't a date is an error, which stops the server.
+pub fn today() -> Result<String, String> {
+    match std::env::var_os("MYBUDGET_TODAY") {
+        Some(today) if !today.is_empty() => today
+            .to_str()
+            .filter(|t| is_date(t))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "MYBUDGET_TODAY must be a date YYYY-MM-DD from 1900-01-01 to 2999-12-31, \
+                     not {}",
+                    today.display()
+                )
+            }),
+        _ => Ok(chrono::Local::now().format("%Y-%m-%d").to_string()),
     }
 }
 
@@ -198,5 +226,17 @@ mod tests {
         assert_eq!(dec.next(), "2027-01".parse().unwrap());
         assert_eq!(dec.next().prev(), dec);
         assert_eq!(Month::of_date("2026-12-31"), dec);
+    }
+
+    #[test]
+    fn dates_on_days_of_a_month() {
+        let month = |s: &str| s.parse::<Month>().unwrap();
+        assert_eq!(month("2026-11").date_on(Some(15)), "2026-11-15");
+        assert_eq!(month("2026-12").date_on(None), "2026-12-31");
+        assert_eq!(month("2027-02").date_on(Some(31)), "2027-02-28");
+        assert_eq!(month("2024-02").date_on(Some(30)), "2024-02-29");
+        assert_eq!(month("1900-02").date_on(None), "1900-02-28");
+        assert_eq!(month("2000-02").date_on(None), "2000-02-29");
+        assert_eq!(month("2026-04").date_on(Some(1)), "2026-04-01");
     }
 }

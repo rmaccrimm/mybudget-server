@@ -42,6 +42,7 @@ mod persistence;
 mod store;
 
 use api::{accounts, categories, imports, months, payees, plans, transactions};
+pub use calendar::today;
 use error::ApiError;
 pub use persistence::migrate;
 pub use store::Store;
@@ -57,13 +58,21 @@ fn log(line: std::fmt::Arguments) {
 /// well inside SPEC 1.4's one second.
 const EXIT_PATIENCE: Duration = Duration::from_millis(500);
 
-/// The state handlers share: the store, behind one lock.
+/// The state handlers share: the store, behind one lock, and today's date,
+/// which is fixed while the server runs (SPEC 18.1).
 #[derive(Clone)]
-pub struct AppState(Arc<Mutex<Store>>);
+pub struct AppState {
+    store: Arc<Mutex<Store>>,
+    today: Arc<str>,
+}
 
 impl AppState {
-    pub fn new(store: Store) -> Self {
-        Self(Arc::new(Mutex::new(store)))
+    /// `today` is a date `YYYY-MM-DD`, as [`today`] gives it.
+    pub fn new(store: Store, today: &str) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            today: today.into(),
+        }
     }
 
     /// Locks the store for the rest of the request, so requests behave as if
@@ -71,9 +80,14 @@ impl AppState {
     fn store(&self) -> MutexGuard<'_, Store> {
         // A handler that panicked may have left a change half-applied, so
         // the data can't be trusted after that.
-        self.0
+        self.store
             .lock()
             .expect("no handler panicked while holding the store")
+    }
+
+    /// Today's date (SPEC 18.1).
+    fn today(&self) -> &str {
+        &self.today
     }
 
     /// Exits the process with status 0 once no request holds the store, so
@@ -87,7 +101,7 @@ impl AppState {
         let deadline = Instant::now() + EXIT_PATIENCE;
         // Held until the process ends; a poisoned lock is held all the same.
         let _store = loop {
-            match self.0.try_lock() {
+            match self.store.try_lock() {
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -179,6 +193,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/plans/{plan}/months/{month}/categories/{category}",
             get(months::get_category).patch(months::update_category),
+        )
+        .route(
+            "/plans/{plan}/months/{month}/categories/{category}/assignments",
+            get(months::assignments),
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)

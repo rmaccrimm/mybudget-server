@@ -1,5 +1,5 @@
-//! Plans as rows of a plan file's tables (schema version 2, in
-//! `migrations/01-plans` and `migrations/02-imports`).
+//! Plans as rows of a plan file's tables (schema version 3, in
+//! `migrations/01-plans` to `migrations/03-targets`).
 //!
 //! Each kind of object is a [`Record`]: a row of its own table with an `id`,
 //! a `position` giving its list order, and a column for each field. Saving a
@@ -16,8 +16,8 @@ use super::Failure;
 use crate::calendar::{self, Month};
 use crate::import::{ImportOptions, StatementKey};
 use crate::model::{
-    Account, AccountType, Assigned, BankData, Category, Cleared, FlagColor, Group, Import, Payee,
-    Plan, PlanInfo, READY_TO_ASSIGN, Subtransaction, Table, Transaction,
+    Account, AccountType, Assignment, BankData, Category, Cleared, FlagColor, Goal, Group, Import,
+    Payee, Plan, PlanInfo, READY_TO_ASSIGN, Subtransaction, Table, Target, TargetType, Transaction,
 };
 use crate::ofx::StatementType;
 
@@ -43,7 +43,7 @@ macro_rules! wire_name_columns {
     )*};
 }
 
-wire_name_columns!(AccountType, Cleared, FlagColor, StatementType);
+wire_name_columns!(AccountType, Cleared, FlagColor, StatementType, TargetType);
 
 impl ToSql for Month {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
@@ -181,6 +181,8 @@ impl Record for Category {
         ]
     }
 
+    /// The category without its targets, which [`read_plan`] reads from
+    /// their own table.
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get("id")?,
@@ -189,6 +191,61 @@ impl Record for Category {
             hidden: row.get("hidden")?,
             note: row.get("note")?,
             payment_account_id: row.get("payment_account_id")?,
+            targets: Vec::new(),
+        })
+    }
+
+    fn write_parts(&self, conn: &Connection) -> rusqlite::Result<()> {
+        Self::delete_parts(conn, &self.id)?;
+        let mut insert = conn.prepare_cached(
+            "INSERT INTO category_targets \
+             (category_id, position, type, amount, by_date, start_month, end_month) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (position, t) in (1_i64..).zip(&self.targets) {
+            insert.execute(params![
+                self.id,
+                position,
+                t.goal.kind,
+                t.goal.amount,
+                t.goal.by_date,
+                t.start_month,
+                t.end_month
+            ])?;
+        }
+        Ok(())
+    }
+
+    fn delete_parts(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+        conn.prepare_cached("DELETE FROM category_targets WHERE category_id = ?1")?
+            .execute([id])?;
+        Ok(())
+    }
+}
+
+impl Record for Assignment {
+    const TABLE: &str = "assignment_history";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn columns(&self) -> Vec<(&'static str, &dyn ToSql)> {
+        vec![
+            ("category_id", &self.category_id),
+            ("month", &self.month),
+            ("date", &self.date),
+            ("amount", &self.amount),
+        ]
+    }
+
+    fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            category_id: row.get("category_id")?,
+            month: row.get("month")?,
+            date: row.get("date")?,
+            amount: row.get("amount")?,
         })
     }
 }
@@ -364,31 +421,6 @@ fn put_at<R: Record>(conn: &Connection, row: &R, position: i64) -> rusqlite::Res
     row.write_parts(conn)
 }
 
-fn write_assigned(conn: &Connection, old: &Assigned, new: &Assigned) -> rusqlite::Result<()> {
-    let amount = |assigned: &Assigned, category: &str, month: &Month| {
-        assigned.get(category)?.get(month).copied()
-    };
-    for (category, months) in old {
-        for month in months.keys().filter(|m| amount(new, category, m).is_none()) {
-            conn.prepare_cached("DELETE FROM assignments WHERE category_id = ?1 AND month = ?2")?
-                .execute(params![category, month])?;
-        }
-    }
-    for (category, months) in new {
-        for (month, &assigned) in months
-            .iter()
-            .filter(|&(m, &a)| amount(old, category, m) != Some(a))
-        {
-            conn.prepare_cached(
-                "INSERT INTO assignments (category_id, month, assigned) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT (category_id, month) DO UPDATE SET assigned = excluded.assigned",
-            )?
-            .execute(params![category, month, assigned])?;
-        }
-    }
-    Ok(())
-}
-
 /// The import ids each account has had (SPEC 17.9).
 type ImportIds = HashMap<String, BTreeSet<String>>;
 
@@ -486,10 +518,10 @@ pub fn write_plan(conn: &Connection, old: Option<&Plan>, new: &Plan) -> rusqlite
         old.map_or(&Table::new(), |p| &p.transactions),
         &new.transactions,
     )?;
-    write_assigned(
+    write_table(
         conn,
-        old.map_or(&Assigned::new(), |p| &p.assigned),
-        &new.assigned,
+        old.map_or(&Table::new(), |p| &p.assignments),
+        &new.assignments,
     )?;
     write_import_ids(
         conn,
@@ -531,6 +563,75 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
     let [(info, created_at)] =
         <[_; 1]>::try_from(plan_rows).map_err(|_| "the plan table must have one row")?;
 
+    let mut import_ids = ImportIds::new();
+    let mut ids = conn.prepare("SELECT account_id, import_id FROM account_import_ids")?;
+    for row in ids.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+        let (account_id, import_id): (String, String) = row?;
+        import_ids.entry(account_id).or_default().insert(import_id);
+    }
+
+    let mut options = conn.prepare("SELECT * FROM import_options")?;
+    let import_options = options
+        .query_map([], |r| {
+            let key = StatementKey {
+                kind: r.get("type")?,
+                bank_id: r.get("bank_id")?,
+                account_number: r.get("account_number")?,
+            };
+            let options = ImportOptions {
+                account_id: r.get("account_id")?,
+                swap_payee_memo: r.get("swap_payee_memo")?,
+                invert_amounts: r.get("invert_amounts")?,
+            };
+            Ok((key, options))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let plan = Plan {
+        info,
+        created_at,
+        accounts: read_table(conn)?,
+        payees: read_table(conn)?,
+        groups: read_table(conn)?,
+        categories: read_categories(conn)?,
+        transactions: read_transactions(conn)?,
+        assignments: read_table(conn)?,
+        import_ids,
+        import_options,
+    };
+    check_links(&plan)?;
+    Ok(plan)
+}
+
+/// The categories with their targets.
+fn read_categories(conn: &Connection) -> Result<Table<Category>, Failure> {
+    let mut categories: Table<Category> = read_table(conn)?;
+    let mut targets =
+        conn.prepare("SELECT * FROM category_targets ORDER BY category_id, position")?;
+    let targets = targets.query_map([], |r| {
+        let target = Target {
+            goal: Goal {
+                kind: r.get("type")?,
+                amount: r.get("amount")?,
+                by_date: r.get("by_date")?,
+            },
+            start_month: r.get("start_month")?,
+            end_month: r.get("end_month")?,
+        };
+        Ok((r.get::<_, String>("category_id")?, target))
+    })?;
+    for row in targets {
+        let (category_id, target) = row?;
+        let c = categories
+            .get_mut(&category_id)
+            .ok_or("a target's category is missing")?;
+        c.targets.push(target);
+    }
+    Ok(categories)
+}
+
+/// The transactions with their subtransactions and imports.
+fn read_transactions(conn: &Connection) -> Result<Table<Transaction>, Failure> {
     let mut transactions: Table<Transaction> = read_table(conn)?;
     let mut subtransactions =
         conn.prepare("SELECT * FROM subtransactions ORDER BY transaction_id, position")?;
@@ -571,55 +672,7 @@ pub fn read_plan(conn: &Connection) -> Result<Plan, Failure> {
             .ok_or("an import's transaction is missing")?;
         t.import = Some(import);
     }
-
-    let mut assigned = Assigned::new();
-    let mut assignments = conn.prepare("SELECT category_id, month, assigned FROM assignments")?;
-    for row in assignments.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
-        let (category_id, month, amount): (String, Month, i64) = row?;
-        assigned
-            .entry(category_id)
-            .or_default()
-            .insert(month, amount);
-    }
-
-    let mut import_ids = ImportIds::new();
-    let mut ids = conn.prepare("SELECT account_id, import_id FROM account_import_ids")?;
-    for row in ids.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
-        let (account_id, import_id): (String, String) = row?;
-        import_ids.entry(account_id).or_default().insert(import_id);
-    }
-
-    let mut options = conn.prepare("SELECT * FROM import_options")?;
-    let import_options = options
-        .query_map([], |r| {
-            let key = StatementKey {
-                kind: r.get("type")?,
-                bank_id: r.get("bank_id")?,
-                account_number: r.get("account_number")?,
-            };
-            let options = ImportOptions {
-                account_id: r.get("account_id")?,
-                swap_payee_memo: r.get("swap_payee_memo")?,
-                invert_amounts: r.get("invert_amounts")?,
-            };
-            Ok((key, options))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-
-    let plan = Plan {
-        info,
-        created_at,
-        accounts: read_table(conn)?,
-        payees: read_table(conn)?,
-        groups: read_table(conn)?,
-        categories: read_table(conn)?,
-        transactions,
-        assigned,
-        import_ids,
-        import_options,
-    };
-    check_links(&plan)?;
-    Ok(plan)
+    Ok(transactions)
 }
 
 /// Checks the links between a plan's objects that the server relies on, so
@@ -630,7 +683,9 @@ fn check_links(plan: &Plan) -> Result<(), String> {
     check_accounts(plan)?;
     check_payees(plan)?;
     check_categories(plan)?;
+    check_targets(plan)?;
     check_transactions(plan)?;
+    check_assignments(plan)?;
     check_imports(plan)
 }
 
@@ -708,6 +763,48 @@ fn check_categories(plan: &Plan) -> Result<(), String> {
             account
                 .is_none_or(|a| a.is_some_and(|a| a.payment_category_id.as_ref() == Some(&c.id))),
             "a payment category's account is missing",
+        )?;
+    }
+    Ok(())
+}
+
+/// A category's targets are each valid (SPEC 18.3), and follow one another
+/// without applying to the same month, only the last without end (18.4).
+fn check_targets(plan: &Plan) -> Result<(), String> {
+    for c in plan.categories.values() {
+        ensure(
+            c.payment_account_id.is_none() || c.targets.is_empty(),
+            "a payment category has a target",
+        )?;
+        for t in &c.targets {
+            ensure(
+                t.goal.amount > 0 && t.goal.by_date.is_none_or(|d| (1..=31).contains(&d)),
+                "a target isn't valid",
+            )?;
+            ensure(
+                t.end_month.is_none_or(|end| t.start_month <= end),
+                "a target ends before it starts",
+            )?;
+        }
+        ensure(
+            c.targets
+                .windows(2)
+                .all(|w| w[0].end_month.is_some_and(|end| end < w[1].start_month)),
+            "a category's targets overlap",
+        )?;
+    }
+    Ok(())
+}
+
+fn check_assignments(plan: &Plan) -> Result<(), String> {
+    for a in plan.assignments.values() {
+        ensure(
+            plan.categories.contains_key(&a.category_id),
+            "an assignment's category is missing",
+        )?;
+        ensure(
+            calendar::is_date(&a.date),
+            "an assignment's date isn't a date",
         )?;
     }
     Ok(())
@@ -802,7 +899,7 @@ mod tests {
         assert_rows(&read.groups, &written.groups);
         assert_rows(&read.categories, &written.categories);
         assert_rows(&read.transactions, &written.transactions);
-        assert_eq!(read.assigned, written.assigned);
+        assert_rows(&read.assignments, &written.assignments);
         assert_eq!(read.import_ids, written.import_ids);
         assert_eq!(read.import_options, written.import_options);
     }
@@ -816,6 +913,7 @@ mod tests {
             hidden: false,
             note: None,
             payment_account_id: None,
+            targets: Vec::new(),
         };
         plan.categories.insert(id.clone(), category);
         id
@@ -889,10 +987,21 @@ mod tests {
             &checking,
             vec![line(-3, &a, Some("x")), line(-4, &b, None)],
         );
-        plan.assigned
-            .entry(a.clone())
-            .or_default()
-            .insert("2026-10".parse().unwrap(), 7);
+        let [oct, nov, dec] = ["2026-10", "2026-11", "2026-12"].map(|m| m.parse().unwrap());
+        plan.assign(&a, oct, 7, "2026-10-01");
+        plan.assign(&c, oct, 3, "2026-10-02");
+        let target = |start_month, by_date| Target {
+            goal: Goal {
+                kind: TargetType::Refill,
+                amount: 5,
+                by_date,
+            },
+            start_month,
+            end_month: None,
+        };
+        plan.categories[&b].set_target(target(oct, Some(31)));
+        plan.categories[&b].set_target(target(dec, None));
+        plan.categories[&c].set_target(target(nov, None));
         write_plan(&conn, None, &plan).unwrap();
         assert_holds(&conn, &plan);
 
@@ -916,13 +1025,13 @@ mod tests {
         edited.amount = -7;
         add_transaction(&mut plan, &checking, vec![]);
         let unused = plan.payee_by_name("Unused");
-        plan.assigned.remove(&a);
-        plan.assigned
-            .entry(d.clone())
-            .or_default()
-            .insert("2026-11".parse().unwrap(), -2);
+        plan.assign(&a, oct, 0, "2026-10-03");
+        plan.assign(&d, nov, -2, "2026-10-03");
+        plan.categories[&b].end_targets_at(nov);
         write_plan(&conn, Some(&old), &plan).unwrap();
         assert_holds(&conn, &plan);
+        assert_eq!(plan.assigned()[d.as_str()][&oct], 3);
+        assert_eq!(plan.categories[&b].targets.len(), 1);
 
         // Moving one back works from positions with gaps.
         let old = plan.clone();

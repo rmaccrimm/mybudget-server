@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Serialize;
 
 use crate::calendar::Month;
-use crate::model::{Plan, READY_TO_ASSIGN, Transaction};
+use crate::model::{Assigned, Plan, READY_TO_ASSIGN, Target, Transaction};
 
 /// Whose figures these are: a category's id, or [`UNCATEGORIZED`].
 type Key<'a> = Option<&'a str>;
@@ -30,6 +30,11 @@ pub struct Entry {
     pub available: i64,
     pub cash_overspending: i64,
     pub credit_overspending: i64,
+    /// The target that applies this month, when its due date is and how
+    /// much more it asks to assign; all `None` without one (SPEC 18.5).
+    pub target: Option<Target>,
+    pub due: Option<String>,
+    pub underfunded: Option<i64>,
 }
 
 /// A month's figures (SPEC 11.6, 11.7).
@@ -44,6 +49,8 @@ pub struct MonthView {
     left_over_from_last_month: i64,
     assigned_in_future: i64,
     ready_to_assign: i64,
+    /// The sum of its categories' `underfunded` (SPEC 18.6).
+    underfunded: i64,
     uncategorized: Entry,
     categories: Vec<Entry>,
 }
@@ -86,15 +93,15 @@ struct Raw {
 }
 
 /// A month map holding a category's assigned amounts (SPEC 11.2), each put
-/// in place by `assigned`.
+/// in place by `field`.
 fn with_assigned<T: Default>(
-    plan: &Plan,
+    assigned: &Assigned,
     category_id: &str,
-    assigned: impl Fn(&mut T) -> &mut i64,
+    field: impl Fn(&mut T) -> &mut i64,
 ) -> BTreeMap<Month, T> {
     let mut map: BTreeMap<Month, T> = BTreeMap::new();
-    for (&m, &a) in plan.assigned.get(category_id).into_iter().flatten() {
-        *assigned(map.entry(m).or_default()) = a;
+    for (&m, &a) in assigned.get(category_id).into_iter().flatten() {
+        *field(map.entry(m).or_default()) = a;
     }
     map
 }
@@ -121,7 +128,7 @@ struct Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
-    fn gather(plan: &'a Plan) -> Self {
+    fn gather(plan: &'a Plan, assigned: &Assigned) -> Self {
         let raw = plan
             .categories
             .values()
@@ -129,7 +136,7 @@ impl<'a> Lines<'a> {
             .map(|c| {
                 (
                     Some(c.id.as_str()),
-                    with_assigned(plan, &c.id, |r: &mut Raw| &mut r.assigned),
+                    with_assigned(assigned, &c.id, |r: &mut Raw| &mut r.assigned),
                 )
             })
             .chain([(UNCATEGORIZED, BTreeMap::new())])
@@ -249,7 +256,8 @@ impl<'a> Lines<'a> {
 
 impl<'a> Budget<'a> {
     pub fn new(plan: &'a Plan) -> Self {
-        let mut lines = Lines::gather(plan);
+        let assigned = plan.assigned();
+        let mut lines = Lines::gather(plan, &assigned);
         let mut cells = lines.settle();
 
         // Payment categories (SPEC 12.1, 12.4).
@@ -257,7 +265,7 @@ impl<'a> Budget<'a> {
             let Some(account_id) = &c.payment_account_id else {
                 continue;
             };
-            let mut map = with_assigned(plan, &c.id, |cell: &mut Cell| &mut cell.assigned);
+            let mut map = with_assigned(&assigned, &c.id, |cell: &mut Cell| &mut cell.assigned);
             let ai = plan
                 .accounts
                 .get_index_of(account_id)
@@ -294,6 +302,14 @@ impl<'a> Budget<'a> {
             .copied()
             .unwrap_or_default();
         let available = cell.available(before);
+        // Uncategorized has no target (SPEC 18.5).
+        let target = key.and_then(|id| {
+            self.plan
+                .categories
+                .get(id)
+                .expect("entries are for the plan's categories")
+                .target_in(month)
+        });
         Entry {
             category_id: key.map(str::to_owned),
             assigned: cell.assigned,
@@ -301,6 +317,9 @@ impl<'a> Budget<'a> {
             available,
             cash_overspending: cell.cash_overspending(available),
             credit_overspending: cell.credit_overspending,
+            target: target.cloned(),
+            due: target.map(|t| month.date_on(t.goal.by_date)),
+            underfunded: target.map(|t| t.goal.underfunded(carryover(before), cell.assigned)),
         }
     }
 
@@ -339,6 +358,7 @@ impl<'a> Budget<'a> {
     pub fn month(&self, month: Month) -> MonthView {
         let mut assigned = 0i64;
         let mut activity = 0i64;
+        let mut underfunded = 0i64;
         let mut categories = Vec::new();
         for c in self
             .plan
@@ -351,6 +371,7 @@ impl<'a> Budget<'a> {
             if c.payment_account_id.is_none() {
                 activity += e.activity;
             }
+            underfunded += e.underfunded.unwrap_or(0);
             categories.push(e);
         }
         // Uncategorized counts in the month's activity (SPEC 16.2).
@@ -387,6 +408,7 @@ impl<'a> Budget<'a> {
             left_over_from_last_month,
             assigned_in_future,
             ready_to_assign: pool - assigned_in_future,
+            underfunded,
             uncategorized,
             categories,
         }

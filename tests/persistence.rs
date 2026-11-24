@@ -11,6 +11,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The schema version the server writes (SPEC 15.8, 18.8).
+const LATEST: i64 = 3;
+
 fn data_dir() -> TempDir {
     tempfile::tempdir().unwrap()
 }
@@ -275,7 +278,7 @@ fn files_are_named_after_plans() {
         ]
     );
     let file = dir.path().join("Household.sqlite");
-    assert_eq!(user_version(&file), 2);
+    assert_eq!(user_version(&file), LATEST);
 
     // A rename that keeps the safe name keeps the file, suffix included.
     expect(
@@ -510,7 +513,7 @@ fn a_copy_skipped_for_another_reason_hides_nothing() {
             fs::set_permissions(copy, fs::Permissions::from_mode(0o000)).unwrap();
         }),
         ("newer", |copy| {
-            change_in_wal(copy, "PRAGMA user_version = 3")
+            change_in_wal(copy, &format!("PRAGMA user_version = {}", LATEST + 1));
         }),
         ("broken past its plan row", |copy| {
             change_in_wal(copy, "DROP TABLE payees");
@@ -573,7 +576,7 @@ fn migrate_changes_only_plan_files_to_known_versions() {
     drop(s);
     let file = dir.path().join("Household.sqlite");
     let bytes = fs::read(&file).unwrap();
-    let out = migrate(&file, "2");
+    let out = migrate(&file, &LATEST.to_string());
     assert!(
         out.status.success(),
         "{}",
@@ -581,7 +584,8 @@ fn migrate_changes_only_plan_files_to_known_versions() {
     );
     assert!(out.stdout.is_empty());
     assert_eq!(fs::read(&file).unwrap(), bytes);
-    for bad in ["0", "3", "-1", "1.0", "one", ""] {
+    let newer = (LATEST + 1).to_string();
+    for bad in ["0", &newer, "-1", "1.0", "one", ""] {
         let out = migrate(&file, bad);
         assert!(!out.status.success(), "{bad}");
         assert!(!out.stderr.is_empty());
@@ -929,7 +933,7 @@ fn migrate_to_its_own_version_works_in_a_read_only_directory() {
     let file = data.join("Household.sqlite");
     let bytes = fs::read(&file).unwrap();
     fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
-    let out = migrate(&file, "2");
+    let out = migrate(&file, &LATEST.to_string());
     fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
         out.status.success(),

@@ -93,7 +93,8 @@ fn entry(
     credit: i64,
 ) -> Value {
     json!({"category_id": cat, "assigned": assigned, "activity": activity, "available": available,
-           "cash_overspending": cash, "credit_overspending": credit})
+           "cash_overspending": cash, "credit_overspending": credit,
+           "target": null, "due": null, "underfunded": null})
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn example_16_5() {
         f.month("2026-10"),
         json!({"month": "2026-10", "income": 1000000, "cash_advances": 0, "assigned": 300000,
                "activity": -70000, "cash_overspending_last_month": 0, "left_over_from_last_month": 0,
-               "assigned_in_future": 0, "ready_to_assign": 700000,
+               "assigned_in_future": 0, "ready_to_assign": 700000, "underfunded": 0,
                "uncategorized": entry(None, 0, -70000, -70000, 30000, 40000),
                "categories": [entry(Some(&pay), 0, 0, 0, 0, 0),
                               entry(Some(&groceries), 300000, 0, 300000, 0, 0)]})
@@ -122,7 +123,7 @@ fn example_16_5() {
         f.month("2026-11"),
         json!({"month": "2026-11", "income": 0, "cash_advances": 0, "assigned": 0,
                "activity": 0, "cash_overspending_last_month": 30000, "left_over_from_last_month": 700000,
-               "assigned_in_future": 0, "ready_to_assign": 670000,
+               "assigned_in_future": 0, "ready_to_assign": 670000, "underfunded": 0,
                "uncategorized": no_uncategorized(),
                "categories": [entry(Some(&pay), 0, 0, 0, 0, 0),
                               entry(Some(&groceries), 0, 0, 300000, 0, 0)]})

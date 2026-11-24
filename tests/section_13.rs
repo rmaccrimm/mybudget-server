@@ -129,7 +129,8 @@ fn reassigns_transactions_and_assigned() {
     assert_eq!(
         entry,
         json!({"category_id": f.groceries, "assigned": 450000, "activity": -204000, "available": 246000,
-               "cash_overspending": 0, "credit_overspending": 0})
+               "cash_overspending": 0, "credit_overspending": 0,
+               "target": null, "due": null, "underfunded": null})
     );
     let split = expect(f.get(&format!("transactions/{}", id(&split))), 200);
     assert_eq!(

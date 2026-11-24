@@ -5,7 +5,7 @@
 
 use serde::de::{DeserializeOwned, IntoDeserializer, value};
 
-use crate::calendar;
+use crate::calendar::{self, Month};
 use crate::error::ApiError;
 use crate::json::{self, Json, Object};
 
@@ -202,18 +202,45 @@ pub fn is_amount(n: i64) -> bool {
     (-MAX_AMOUNT..=MAX_AMOUNT).contains(&n)
 }
 
-/// An amount in milliunits: a JSON integer with no fraction or exponent,
-/// within ±[`MAX_AMOUNT`]. `-0` is 0 (SPEC 3.7).
-pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
-    let parsed = match v {
-        Json::Number(raw) if !raw.contains(['.', 'e', 'E']) => raw.parse::<i64>().ok(),
+/// A JSON integer written without a fraction or exponent (SPEC 3.7, 18.3),
+/// if it fits an `i64`. `-0` is 0.
+fn integer(v: &Json) -> Option<i64> {
+    match v {
+        Json::Number(raw) if !raw.contains(['.', 'e', 'E']) => raw.parse().ok(),
         _ => None,
-    };
-    match parsed {
+    }
+}
+
+/// An amount in milliunits: a JSON integer within ±[`MAX_AMOUNT`]
+/// (SPEC 3.7).
+pub fn amount(field: &str, v: &Json) -> Result<i64, ApiError> {
+    match integer(v) {
         Some(n) if is_amount(n) => Ok(n),
         _ => Err(ApiError::bad_request(format!(
             "{field} must be an integer from -{MAX_AMOUNT} to {MAX_AMOUNT}"
         ))),
+    }
+}
+
+/// A day of the month: a JSON integer from 1 to 31 (SPEC 18.3).
+pub fn day_of_month(field: &str, v: &Json) -> Result<u8, ApiError> {
+    integer(v)
+        .and_then(|n| u8::try_from(n).ok())
+        .filter(|d| (1..=31).contains(d))
+        .ok_or_else(|| ApiError::bad_request(format!("{field} must be an integer from 1 to 31")))
+}
+
+/// The error for a month that isn't one (SPEC 3.8).
+pub fn invalid_month(field: &str) -> ApiError {
+    ApiError::bad_request(format!(
+        "{field} must be a month YYYY-MM from 1900-01 to 2999-12"
+    ))
+}
+
+pub fn month(field: &str, v: &Json) -> Result<Month, ApiError> {
+    match v {
+        Json::String(s) => s.parse().map_err(|_| invalid_month(field)),
+        _ => Err(invalid_month(field)),
     }
 }
 
@@ -269,6 +296,25 @@ mod tests {
         }
         assert!(amount("a", &Json::String("1".into())).is_err());
         assert!(amount("a", &Json::Null).is_err());
+    }
+
+    #[test]
+    fn days_of_the_month() {
+        assert_eq!(day_of_month("d", &num("1")).unwrap(), 1);
+        assert_eq!(day_of_month("d", &num("31")).unwrap(), 31);
+        for bad in [
+            "0",
+            "-0",
+            "32",
+            "-1",
+            "15.0",
+            "1e1",
+            "256",
+            "99999999999999999999",
+        ] {
+            assert!(day_of_month("d", &num(bad)).is_err(), "{bad}");
+        }
+        assert!(day_of_month("d", &Json::String("15".into())).is_err());
     }
 
     #[test]

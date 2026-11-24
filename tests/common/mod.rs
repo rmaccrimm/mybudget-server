@@ -130,5 +130,6 @@ pub fn new_plan(s: &Server) -> String {
 /// A month's `uncategorized` entry (SPEC 16.3) when nothing is uncategorized.
 pub fn no_uncategorized() -> Value {
     serde_json::json!({"category_id": null, "assigned": 0, "activity": 0, "available": 0,
-                       "cash_overspending": 0, "credit_overspending": 0})
+                       "cash_overspending": 0, "credit_overspending": 0,
+                       "target": null, "due": null, "underfunded": null})
 }

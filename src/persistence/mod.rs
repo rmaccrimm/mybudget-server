@@ -33,6 +33,8 @@ const MIGRATIONS: &[M] = &[
         .down(include_str!("../../migrations/01-plans/down.sql")),
     M::up(include_str!("../../migrations/02-imports/up.sql"))
         .down(include_str!("../../migrations/02-imports/down.sql")),
+    M::up(include_str!("../../migrations/03-targets/up.sql"))
+        .down(include_str!("../../migrations/03-targets/down.sql")),
 ];
 
 /// The schema version this server writes.

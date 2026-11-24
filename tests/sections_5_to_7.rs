@@ -72,7 +72,7 @@ fn accounts_create_list_and_balances() {
     assert_eq!(
         cats[0]["categories"],
         json!([{"id": vpay, "group_id": cats[0]["id"], "name": "Visa", "hidden": false, "note": null,
-                "payment_account_id": id(&visa)}])
+                "payment_account_id": id(&visa), "target": null}])
     );
 
     // Tracking accounts are off budget; a zero starting balance makes no transaction.
@@ -389,7 +389,8 @@ fn categories_and_groups() {
     let rid = id(&rent);
     assert_eq!(
         rent,
-        json!({"id": rid, "group_id": bid, "name": "Rent", "hidden": false, "note": null, "payment_account_id": null})
+        json!({"id": rid, "group_id": bid, "name": "Rent", "hidden": false, "note": null, "payment_account_id": null,
+               "target": null})
     );
     let water = id(&expect(
         post(
@@ -440,7 +441,8 @@ fn categories_and_groups() {
     );
     assert_eq!(
         moved,
-        json!({"id": rid, "group_id": housing, "name": "Rent", "hidden": false, "note": "due on the 1st", "payment_account_id": null})
+        json!({"id": rid, "group_id": housing, "name": "Rent", "hidden": false, "note": "due on the 1st", "payment_account_id": null,
+               "target": null})
     );
     err(
         &patch(&s, &rpath, &format!(r#"{{"group_id": "{ccp}"}}"#)),

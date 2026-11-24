@@ -41,7 +41,8 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let exit_on_eof = std::env::var_os("MYBUDGET_EXIT_ON_STDIN_EOF").is_some_and(|v| v == "1");
     let watch = exit_on_eof.then(StdinWatch::start);
-    let state = AppState::new(open_store()?);
+    let today = mybudget_server::today()?;
+    let state = AppState::new(open_store()?, &today);
     let listener = bind().map_err(|e| e.to_string())?;
     if let Some(watch) = watch {
         watch.wait_to_listen(state.clone());

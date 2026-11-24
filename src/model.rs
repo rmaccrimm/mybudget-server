@@ -150,7 +150,7 @@ pub struct Group {
 pub struct GroupView {
     #[serde(flatten)]
     group: Group,
-    categories: Vec<Category>,
+    categories: Vec<CategoryView>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize)]
@@ -161,6 +161,130 @@ pub struct Category {
     pub hidden: bool,
     pub note: Option<String>,
     pub payment_account_id: Option<String>,
+    /// Every target it has had and still keeps, by `start_month`, none of
+    /// them applying to the same month (SPEC 18.4).
+    #[serde(skip)]
+    pub targets: Vec<Target>,
+}
+
+/// A category as the API shows it, with its current target (SPEC 18.3).
+#[derive(Serialize)]
+pub struct CategoryView {
+    #[serde(flatten)]
+    category: Category,
+    target: Option<Target>,
+}
+
+impl Category {
+    pub fn view(&self) -> CategoryView {
+        CategoryView {
+            category: self.clone(),
+            target: self.current_target().cloned(),
+        }
+    }
+
+    /// The target without end, if there is one (SPEC 18.4).
+    pub fn current_target(&self) -> Option<&Target> {
+        self.targets.last().filter(|t| t.end_month.is_none())
+    }
+
+    /// The target that applies in `month` (SPEC 18.4, 18.5).
+    pub fn target_in(&self, month: Month) -> Option<&Target> {
+        self.targets.iter().find(|t| t.applies_in(month))
+    }
+
+    /// Sets a new target from its `start_month` on (SPEC 18.4), unless the
+    /// current target already asks for the same since then or earlier.
+    pub fn set_target(&mut self, target: Target) {
+        if self
+            .current_target()
+            .is_some_and(|t| t.goal == target.goal && t.start_month <= target.start_month)
+        {
+            return;
+        }
+        self.end_targets_at(target.start_month);
+        self.targets.push(target);
+    }
+
+    /// Leaves no target in `month` or later: those that start then or later
+    /// are removed, and the one that applies then ends the month before
+    /// (SPEC 18.4).
+    pub fn end_targets_at(&mut self, month: Month) {
+        self.targets.retain(|t| t.start_month < month);
+        if let Some(t) = self.targets.last_mut().filter(|t| t.applies_in(month)) {
+            t.end_month = Some(month.prev());
+        }
+    }
+}
+
+/// How a target counts what a category needs (SPEC 18.3, 18.5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetType {
+    /// Assign `amount` every month.
+    SetAside,
+    /// Fill the category up to `amount` every month.
+    Refill,
+}
+
+/// What a target asks for each month it applies to (SPEC 18.3). Setting a
+/// target that asks for what the current one does changes nothing (18.4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub struct Goal {
+    #[serde(rename = "type")]
+    pub kind: TargetType,
+    /// Greater than 0.
+    pub amount: i64,
+    /// The day of the month it's due, from 1 to 31, or `None` for the
+    /// month's last day.
+    pub by_date: Option<u8>,
+}
+
+impl Goal {
+    /// How much more to assign in a month, given what the category carried
+    /// in (SPEC 11.4) and what's assigned (SPEC 18.5).
+    pub fn underfunded(&self, carryover: i64, assigned: i64) -> i64 {
+        let counted = match self.kind {
+            TargetType::SetAside => assigned,
+            TargetType::Refill => carryover + assigned,
+        };
+        (self.amount - counted).max(0)
+    }
+}
+
+/// A category's target over the months it applies to (SPEC 18.4).
+#[derive(Clone, PartialEq, Debug, Serialize)]
+pub struct Target {
+    #[serde(flatten)]
+    pub goal: Goal,
+    pub start_month: Month,
+    /// The last month it applies to, or `None` if it has no end. Only the
+    /// API's four fields are shown (SPEC 18.3).
+    #[serde(skip)]
+    pub end_month: Option<Month>,
+}
+
+impl Target {
+    fn applies_in(&self, month: Month) -> bool {
+        self.start_month <= month && self.end_month.is_none_or(|end| month <= end)
+    }
+}
+
+/// A change to a category's `assigned` for a month (SPEC 18.2). The API
+/// shows only its `date` and `amount`.
+#[derive(Clone, PartialEq, Debug, Serialize)]
+pub struct Assignment {
+    /// Only for keeping it in a plan file.
+    #[serde(skip)]
+    pub id: String,
+    #[serde(skip)]
+    pub category_id: String,
+    #[serde(skip)]
+    pub month: Month,
+    /// The date it was made.
+    pub date: String,
+    /// What it adds to `assigned`, positive or negative.
+    pub amount: i64,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -286,7 +410,7 @@ pub struct PlanInfo {
 
 /// Each category's assigned amounts by month (SPEC 11.2); a month missing
 /// from a category's map has 0 assigned.
-pub type Assigned = HashMap<String, BTreeMap<Month, i64>>;
+pub type Assigned<'a> = HashMap<&'a str, BTreeMap<Month, i64>>;
 
 #[derive(Clone, Debug)]
 pub struct Plan {
@@ -304,7 +428,8 @@ pub struct Plan {
     /// categories in this order lists them in its order (SPEC 7.6).
     pub categories: Table<Category>,
     pub transactions: Table<Transaction>,
-    pub assigned: Assigned,
+    /// Every category's assignments, in the order they were made (SPEC 18.2).
+    pub assignments: Table<Assignment>,
     /// The import ids each account has had, by account id (SPEC 17.9).
     pub import_ids: HashMap<String, BTreeSet<String>>,
     /// What the last import of each statement used (SPEC 17.13).
@@ -332,7 +457,7 @@ impl Plan {
             groups: Table::from([(internal.id.clone(), internal)]),
             categories: Table::new(),
             transactions: Table::new(),
-            assigned: Assigned::new(),
+            assignments: Table::new(),
             import_ids: HashMap::new(),
             import_options: HashMap::new(),
         }
@@ -403,6 +528,7 @@ impl Plan {
                 hidden: false,
                 note: None,
                 payment_account_id: Some(account_id.clone()),
+                targets: Vec::new(),
             };
             let id = category.id.clone();
             self.categories.insert(id.clone(), category);
@@ -535,7 +661,7 @@ impl Plan {
         self.import_options
             .retain(|_, options| options.account_id != account_id);
         if let Some(category_id) = account.payment_category_id {
-            self.assigned.remove(&category_id);
+            self.assignments.retain(|_, a| a.category_id != category_id);
             self.categories.shift_remove(&category_id);
         }
     }
@@ -585,8 +711,60 @@ impl Plan {
     pub fn group_view(&self, group: &Group) -> GroupView {
         GroupView {
             group: group.clone(),
-            categories: self.group_categories(&group.id).cloned().collect(),
+            categories: self
+                .group_categories(&group.id)
+                .map(Category::view)
+                .collect(),
         }
+    }
+
+    // --- assignments --------------------------------------------------------
+
+    /// A category's assignments for a month, in the order they were made
+    /// (SPEC 18.2).
+    pub fn assignments_in<'a>(
+        &'a self,
+        category_id: &'a str,
+        month: Month,
+    ) -> impl Iterator<Item = &'a Assignment> {
+        self.assignments
+            .values()
+            .filter(move |a| a.category_id == category_id && a.month == month)
+    }
+
+    /// Every category's `assigned` by month: the sum of its assignments
+    /// (SPEC 18.2).
+    pub fn assigned(&self) -> Assigned<'_> {
+        let mut assigned = Assigned::new();
+        for a in self.assignments.values() {
+            *assigned
+                .entry(a.category_id.as_str())
+                .or_default()
+                .entry(a.month)
+                .or_insert(0) += a.amount;
+        }
+        assigned
+    }
+
+    /// Sets a category's `assigned` for a month (SPEC 11.2) by making an
+    /// assignment dated `today` of the difference, unless there is none
+    /// (SPEC 18.2).
+    pub fn assign(&mut self, category_id: &str, month: Month, assigned: i64, today: &str) {
+        let before: i64 = self
+            .assignments_in(category_id, month)
+            .map(|a| a.amount)
+            .sum();
+        if assigned == before {
+            return;
+        }
+        let assignment = Assignment {
+            id: new_id(),
+            category_id: category_id.to_owned(),
+            month,
+            date: today.to_owned(),
+            amount: assigned - before,
+        };
+        self.assignments.insert(assignment.id.clone(), assignment);
     }
 
     /// Whether a transaction is uncategorized (SPEC 16.1): in an on-budget
@@ -612,26 +790,30 @@ impl Plan {
             .any(|t| t.has_category(category_id))
     }
 
-    /// Deletes a user category (SPEC 13.3). With `reassign_to`, its
-    /// transactions and subtransactions move to that category, and its
-    /// assigned amounts are added to that category's, month by month.
-    /// Without it, its assigned amounts are dropped; the caller checks it
-    /// isn't in use.
+    /// Deletes a user category with its targets (SPEC 13.3, 18.7). With
+    /// `reassign_to`, its transactions, subtransactions and assignments move
+    /// to that category, which adds its `assigned` to that category's month
+    /// by month; assignments keep their place in the order they were made.
+    /// Without it, its assignments are dropped; the caller checks it isn't
+    /// in use.
     pub fn delete_category(&mut self, category_id: &str, reassign_to: Option<&str>) {
         self.categories
             .shift_remove(category_id)
             .expect("the caller found the category");
-        let assigned = self.assigned.remove(category_id).unwrap_or_default();
         let Some(to) = reassign_to else {
             debug_assert!(!self.category_in_use(category_id));
+            self.assignments.retain(|_, a| a.category_id != category_id);
             return;
         };
         for t in self.transactions.values_mut() {
             t.recategorize(category_id, to);
         }
-        let target = self.assigned.entry(to.to_owned()).or_default();
-        for (month, amount) in assigned {
-            *target.entry(month).or_insert(0) += amount;
+        for a in self
+            .assignments
+            .values_mut()
+            .filter(|a| a.category_id == category_id)
+        {
+            to.clone_into(&mut a.category_id);
         }
     }
 }

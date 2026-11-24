@@ -9,9 +9,11 @@ use axum::{
 };
 
 use crate::AppState;
+use crate::calendar::Month;
 use crate::error::ApiError;
-use crate::fields::{self, Body};
-use crate::model::{ById, Category, Group, Plan, new_id};
+use crate::fields::{self, Body, Patch};
+use crate::json::Json as JsonValue;
+use crate::model::{ById, Category, Goal, Group, Plan, Target, new_id};
 
 /// A body's `group_id` must be one of the plan's own groups (SPEC 7.5, 7.6).
 fn own_group<'a>(plan: &'a Plan, id: &str) -> Result<&'a Group, ApiError> {
@@ -134,12 +136,13 @@ pub async fn create(
         hidden: false,
         note,
         payment_account_id: None,
+        targets: Vec::new(),
     };
     store.change_plan(&plan_id, |plan| {
         plan.categories
             .insert(category.id.clone(), category.clone())
     })?;
-    Ok((StatusCode::CREATED, Json(category)))
+    Ok((StatusCode::CREATED, Json(category.view())))
 }
 
 pub async fn get(
@@ -148,12 +151,37 @@ pub async fn get(
 ) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     Ok(Json(
-        store
-            .plan(&plan_id)?
-            .categories
-            .by_id(&category_id)?
-            .clone(),
+        store.plan(&plan_id)?.categories.by_id(&category_id)?.view(),
     ))
+}
+
+/// A target in a request (SPEC 18.3). `start_month` defaults to
+/// `this_month`, today's, and can't be before it.
+fn target(field: &str, v: &JsonValue, this_month: Month) -> Result<Target, ApiError> {
+    let target = Body::object(field, v)?;
+    let kind = target.required("type", fields::variant)?;
+    let amount = target.required("amount", fields::amount)?;
+    if amount <= 0 {
+        return Err(ApiError::bad_request(
+            "a target's amount must be more than 0",
+        ));
+    }
+    let by_date = target.nullable("by_date", fields::day_of_month)?.or_null();
+    let start_month = target
+        .optional("start_month", fields::month)?
+        .unwrap_or(this_month);
+    if start_month < this_month {
+        return Err(ApiError::bad_request("start_month is before this month"));
+    }
+    Ok(Target {
+        goal: Goal {
+            kind,
+            amount,
+            by_date,
+        },
+        start_month,
+        end_month: None,
+    })
 }
 
 pub async fn update(
@@ -169,9 +197,15 @@ pub async fn update(
     let note = body.nullable("note", fields::note)?;
     let hidden = body.optional("hidden", fields::boolean)?;
     let group_id = body.optional("group_id", fields::string)?;
-    if category.payment_account_id.is_some() && (name.is_some() || group_id.is_some()) {
+    let this_month = Month::of_date(state.today());
+    let target = body.nullable("target", |field, v| target(field, v, this_month))?;
+    // A payment category's name and group follow its account, and it never
+    // has a target (SPEC 7.6, 18.3).
+    if category.payment_account_id.is_some()
+        && (name.is_some() || group_id.is_some() || !matches!(target, Patch::Absent))
+    {
         return Err(ApiError::bad_request(
-            "a payment category's name and group follow its account",
+            "a payment category's name, group and target can't be changed",
         ));
     }
     // Naming the category's own group doesn't move it.
@@ -189,7 +223,14 @@ pub async fn update(
     if let Some(hidden) = hidden {
         category.hidden = hidden;
     }
+    match target {
+        Patch::Absent => {}
+        // Today's month and every later month then have no target (18.4).
+        Patch::Null => category.end_targets_at(this_month),
+        Patch::Set(target) => category.set_target(target),
+    }
 
+    let view = category.view();
     store.change_plan(&plan_id, |plan| {
         // A moved category goes to the end of its new group (SPEC 7.6): the
         // end of the plan's categories, since a group lists them in their
@@ -197,9 +238,9 @@ pub async fn update(
         if moved {
             plan.categories.shift_remove(&category_id);
         }
-        plan.categories.insert(category_id, category.clone())
+        plan.categories.insert(category_id, category)
     })?;
-    Ok(Json(category))
+    Ok(Json(view))
 }
 
 /// `reassign_to` must name one of the plan's user categories other than the
