@@ -329,6 +329,10 @@ fn targets_change_over_time() {
     // In December, removing it keeps November's.
     let s = start_today(dir.path(), "2026-12-01");
     let amount = |month: &str| plan.entry(&s, month, &plan.rent)["target"]["amount"].clone();
+    // November is now before today's month, even for the target it has.
+    err(&plan.set_target(&s, &plan.rent, &target(1, "2026-11")), 400);
+    err(&plan.set_target(&s, &plan.rent, &target(4, "2026-11")), 400);
+    assert_eq!(amount("2026-12"), 4);
     expect(plan.set_target(&s, &plan.rent, &Value::Null), 200);
     assert_eq!(amount("2026-11"), 1);
     assert_eq!(amount("2026-12"), Value::Null);
@@ -351,6 +355,22 @@ fn targets_change_over_time() {
     let pay = visa["payment_category_id"].as_str().unwrap();
     err(&plan.set_target(&s, pay, &Value::Null), 400);
     err(&plan.set_target(&s, pay, &target(1, "2027-01")), 400);
+}
+
+#[test]
+fn without_a_set_today_start_months_are_checked_against_the_clock() {
+    let s = start_with(|c| {
+        c.env_remove("MYBUDGET_TODAY");
+    });
+    let plan = Plan::new(&s);
+    let target = json!({"type": "refill", "amount": 1, "start_month": "1900-01"});
+    err(&plan.set_target(&s, &plan.groceries, &target), 400);
+    let view = expect(
+        plan.set_target(&s, &plan.groceries, &json!({"type": "refill", "amount": 1})),
+        200,
+    );
+    let this_month = chrono::Local::now().format("%Y-%m").to_string();
+    assert_eq!(view["target"]["start_month"], this_month);
 }
 
 #[test]
